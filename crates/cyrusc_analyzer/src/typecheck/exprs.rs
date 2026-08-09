@@ -82,14 +82,24 @@ impl<'a> AnalysisContext<'a> {
 
                     self.resolve_symbol_type(decl_id, symbol_expr.loc(), 0)
                 } else {
-                    None
+                    // This case is necessary because it's possible that, mistakenly,
+                    // user uses a symbol which is not a declaration like module/namespace symbol.
+
+                    let symbol_name = self.formatter.format_symbol_name(symbol_expr.as_symbol_id().unwrap());
+
+                    self.reporter.report(Diag {
+                        level: DiagLevel::Error,
+                        kind: Box::new(AnalyzerDiagKind::UnknownSymbol { symbol_name }),
+                        loc: Some(expr.loc),
+                        hint: None,
+                    });
+                    return None;
                 }
             }
 
             TypedExprKind::Literal(literal) => self.analyze_literal(literal, expected_type.clone()),
             TypedExprKind::Prefix(prefix) => self.analyze_prefix(prefix, expected_type.clone()),
             TypedExprKind::Infix(infix) => self.analyze_infix(infix, expected_type.clone()),
-            TypedExprKind::Unary(unary) => self.analyze_unary(unary),
             TypedExprKind::AddrOf(addr_of) => self.analyze_addr_of(addr_of),
             TypedExprKind::Deref(deref) => self.analyze_deref(deref),
             TypedExprKind::Array(array) => self.analyze_array(array, expected_type.clone()),
@@ -214,7 +224,21 @@ impl<'a> AnalysisContext<'a> {
             TypedExprKind::AddrOf(_) => ValueCategory::RValue,
 
             // propagate (follows operand's value-category)
-            TypedExprKind::FieldAccess(field_access) => field_access.operand.val_cat,
+            TypedExprKind::FieldAccess(field_access) => {
+                // if field access uses thin-arrow,
+                // then follow operands-type instead of operand-lvalue
+                // to determine mutability.
+                if field_access.is_thin_arrow {
+                    if let Some(ty) = &field_access.operand.ty {
+                        if ty.pointer_inner().is_const() {
+                            return ValueCategory::LValue(Mutability::Const);
+                        } else {
+                            return ValueCategory::LValue(Mutability::Var);
+                        }
+                    }
+                }
+                field_access.operand.val_cat
+            }
             TypedExprKind::TupleAccess(tuple_access) => tuple_access.operand.val_cat,
             TypedExprKind::ArrayIndex(array_index) => array_index.operand.val_cat,
 
@@ -229,7 +253,6 @@ impl<'a> AnalysisContext<'a> {
             | TypedExprKind::FuncCall(_)
             | TypedExprKind::MethodCall(_)
             | TypedExprKind::Literal(_)
-            | TypedExprKind::Unary(_)
             | TypedExprKind::Prefix(_)
             | TypedExprKind::Infix(_) => ValueCategory::RValue,
 

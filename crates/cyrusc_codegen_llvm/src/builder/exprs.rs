@@ -8,19 +8,19 @@ use crate::{
         irreg::LocalIRValue,
         values::{InternalValue, InternalValueKind},
     },
-    llvm::{abi::abi_type::abi_type_to_llvm_type, constness::is_basic_value_constant, debug_info::set_debug_location},
+    llvm::{constness::is_basic_value_constant, debug_info::set_debug_location},
 };
-use cyrusc_ast::operators::{InfixOperator, PrefixOperator, UnaryOperator};
+use cyrusc_ast::operators::{InfixOperator, PrefixOperator};
 use cyrusc_internal::{
     abi::{
         args::ABIFunctionInfo,
         layout::{ABIFieldOffsetInfo, ABITypeLayout},
-        types::ABIType,
     },
     cir::{
         cir::*,
         types::{CIRArrayType, CIREnumType, CIRFuncType, CIRType, CIRUnionType},
     },
+    compiler_options::CompilerOption_Profile,
 };
 use cyrusc_source_loc::Loc;
 use cyrusc_typed_ast::types::PlainType;
@@ -46,7 +46,6 @@ impl<'ll> CodeGenIRBuilder<'ll> {
             CIRExprKind::Literal(literal) => self.emit_literal(literal),
             CIRExprKind::Prefix(prefix_expr) => self.emit_prefix_expr(prefix_expr),
             CIRExprKind::Infix(infix_expr) => self.emit_infix_expr(infix_expr, expr.loc),
-            CIRExprKind::Unary(unary_expr) => self.emit_unary_expr(unary_expr, expr.loc),
             CIRExprKind::SizeOf(sizeof_expr) => self.emit_sizeof(sizeof_expr),
             CIRExprKind::Assign(assign_expr) => self.emit_assign(assign_expr),
             CIRExprKind::AddrOf(addr_of_expr) => self.emit_addr_of(addr_of_expr),
@@ -232,17 +231,9 @@ impl<'ll> CodeGenIRBuilder<'ll> {
         let rhs_lvalue = self.emit_expr(&assign.rhs, &Some(assign.lhs.ty.clone()));
         let rhs_value = self.load_rvalue(rhs_lvalue);
 
-        let lhs_ptr = if lhs_lvalue.as_basic_value().is_pointer_value() {
-            lhs_lvalue.as_basic_value().into_pointer_value()
-        } else {
-            let value = lhs_lvalue.as_basic_value();
+        assert!(lhs_lvalue.as_basic_value().is_pointer_value());
 
-            let alloca = self.llvmbuilder.build_alloca(value.get_type(), "assign.cast").unwrap();
-
-            self.llvmbuilder.build_store(alloca, value).unwrap();
-
-            alloca
-        };
+        let lhs_ptr = lhs_lvalue.as_basic_value().into_pointer_value();
 
         self.llvmbuilder
             .build_store(lhs_ptr, rhs_value.as_basic_value())
@@ -264,13 +255,10 @@ impl<'ll> CodeGenIRBuilder<'ll> {
         &self,
         value: BasicValueEnum<'ll>,
         from_cir_type: &CIRType,
-        target_type: ABIType,
+        target_type: CIRType,
     ) -> BasicValueEnum<'ll> {
         let from_type = value.get_type();
-        let target_basic_type: BasicTypeEnum<'ll> =
-            abi_type_to_llvm_type(self.llvm_ctx, &self.target.info, &target_type)
-                .try_into()
-                .unwrap();
+        let target_basic_type: BasicTypeEnum<'ll> = self.emit_type(target_type.clone()).try_into().unwrap();
 
         if from_type == target_basic_type {
             return value;
@@ -315,21 +303,25 @@ impl<'ll> CodeGenIRBuilder<'ll> {
                         .unwrap()
                 }
             }
+
             (BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(to_int)) => self
                 .llvmbuilder
                 .build_ptr_to_int(value.into_pointer_value(), to_int, "ptr_to_int")
                 .unwrap()
                 .into(),
+
             (BasicTypeEnum::IntType(_), BasicTypeEnum::PointerType(to_ptr)) => self
                 .llvmbuilder
                 .build_int_to_ptr(value.into_int_value(), to_ptr, "int_to_ptr")
                 .unwrap()
                 .into(),
+
             (BasicTypeEnum::FloatType(_), BasicTypeEnum::FloatType(to_float)) => self
                 .llvmbuilder
                 .build_float_cast(value.into_float_value(), to_float, "fpext")
                 .unwrap()
                 .into(),
+
             (BasicTypeEnum::IntType(_), BasicTypeEnum::FloatType(to_float)) => {
                 if from_cir_type.is_signed_integer() {
                     self.llvmbuilder
@@ -343,7 +335,9 @@ impl<'ll> CodeGenIRBuilder<'ll> {
                         .into()
                 }
             }
+
             (BasicTypeEnum::PointerType(_), BasicTypeEnum::PointerType(_)) => value,
+
             (BasicTypeEnum::VectorType(_), BasicTypeEnum::VectorType(_)) => self
                 .llvmbuilder
                 .build_bit_cast(value, target_basic_type, "bitcast")
@@ -468,7 +462,7 @@ impl<'ll> CodeGenIRBuilder<'ll> {
 
     fn emit_array(&mut self, array: &CIRArrayExpr) -> InternalValue<'ll> {
         let cir_array_type = array.ty.as_array().unwrap();
-        let element_ty = cir_array_type.element_type.clone();
+        let cir_element_type = cir_array_type.element_type.clone();
 
         let array_type: ArrayType<'ll> = self.emit_array_type(cir_array_type.clone()).try_into().unwrap();
 
@@ -481,7 +475,7 @@ impl<'ll> CodeGenIRBuilder<'ll> {
             let mut rvalue = self.load_rvalue(lvalue);
 
             if !self.llvmbuilder.get_insert_block().is_none() {
-                rvalue = self.emit_implicit_cast(&element_ty, rvalue);
+                rvalue = self.emit_implicit_cast(&cir_element_type, rvalue);
             }
 
             if !is_basic_value_constant(rvalue.as_basic_value()) {
@@ -492,10 +486,10 @@ impl<'ll> CodeGenIRBuilder<'ll> {
         }
 
         // zero-fill if array type is fixed-length and not fully initialized
-        let element_basic_ty: BasicTypeEnum<'ll> = self.emit_type(*element_ty.clone()).try_into().unwrap();
+        let element_type: BasicTypeEnum<'ll> = self.emit_type(*cir_element_type.clone()).try_into().unwrap();
 
         while elements.len() < array_type.len() as usize {
-            elements.push(element_basic_ty.const_zero());
+            elements.push(element_type.const_zero());
             all_const = false;
         }
 
@@ -622,11 +616,11 @@ impl<'ll> CodeGenIRBuilder<'ll> {
 
         match mode {
             DerefMode::Load => {
-                let inner_ty = rvalue.ty.pointer_inner().unwrap();
+                let inner_type = rvalue.ty.pointer_inner().unwrap();
 
-                let llvm_ty: BasicTypeEnum<'ll> = self.emit_type(inner_ty.clone()).try_into().unwrap();
-                let loaded_value = self.llvmbuilder.build_load(llvm_ty, ptr, "deref").unwrap();
-                InternalValue::new(inner_ty.clone(), InternalValueKind::RValue(loaded_value.into()))
+                let llvm_type: BasicTypeEnum<'ll> = self.emit_type(inner_type.clone()).try_into().unwrap();
+                let loaded_value = self.llvmbuilder.build_load(llvm_type, ptr, "deref").unwrap();
+                InternalValue::new(inner_type.clone(), InternalValueKind::RValue(loaded_value.into()))
             }
             DerefMode::Store => self.emit_lvalue_address(&CIRExpr {
                 kind: CIRExprKind::Deref(deref.clone()),
@@ -642,232 +636,82 @@ impl<'ll> CodeGenIRBuilder<'ll> {
         InternalValue::new(sizeof_expr.ty.clone(), InternalValueKind::RValue(size_value.into()))
     }
 
-    fn emit_unary_expr(&mut self, unary_expr: &CIRUnaryExpr, loc: Loc) -> InternalValue<'ll> {
-        let lvalue = self.emit_lvalue_address(&unary_expr.operand);
-        let lvalue_ptr = match lvalue.kind {
-            InternalValueKind::LValue(ptr) => ptr,
-            InternalValueKind::RValue(val) => {
-                let alloca = self.llvmbuilder.build_alloca(val.get_type(), "unary.cast").unwrap();
-                self.llvmbuilder.build_store(alloca, val).unwrap();
-                alloca
-            }
-            _ => unreachable!("Cannot perform unary operation on non-LValue/RValue"),
-        };
-
-        let rvalue = self.load_rvalue(lvalue);
-
-        let ty = rvalue.ty.clone();
-        let is_pointer = ty.is_pointer();
-
-        let unit_int_value = {
-            if is_pointer {
-                self.llvm_ctx.i64_type().const_int(1, false)
-            } else {
-                let is_signed = ty.is_signed_integer();
-                let basic_type: BasicTypeEnum<'ll> = self.emit_type(ty.clone()).try_into().unwrap();
-                basic_type.into_int_type().const_int(1, is_signed)
-            }
-        };
-
-        match unary_expr.op {
-            UnaryOperator::PreIncrement => {
-                let new_value = if is_pointer {
-                    let ptr = rvalue.as_basic_value().into_pointer_value();
-                    let value = self.emit_pointer_add(ptr, unit_int_value, ty.clone());
-                    value
-                } else {
-                    let unit_value = InternalValue::new(
-                        ty.clone(),
-                        InternalValueKind::RValue(BasicValueEnum::IntValue(unit_int_value)),
-                    );
-
-                    self.emit_add(rvalue.clone(), unit_value, loc)
-                };
-
-                self.llvmbuilder
-                    .build_store(lvalue_ptr, new_value.as_basic_value())
-                    .unwrap();
-
-                if let CIRExprKind::Load(value_ref) = &unary_expr.operand.kind {
-                    if let Some(LocalIRValue::RValue(_, _)) = self.lookup_local_ir_value(value_ref.irv_id) {
-                        self.insert_local_ir_value(
-                            value_ref.irv_id,
-                            LocalIRValue::RValue(new_value.as_basic_value(), ty.clone()),
-                        );
-                    }
-                }
-
-                new_value
-            }
-            UnaryOperator::PreDecrement => {
-                let new_value = if is_pointer {
-                    let ptr = rvalue.as_basic_value().into_pointer_value();
-                    let value = self.emit_pointer_sub(ptr, unit_int_value, ty.clone());
-                    value
-                } else {
-                    let unit_value = InternalValue::new(
-                        ty.clone(),
-                        InternalValueKind::RValue(BasicValueEnum::IntValue(unit_int_value)),
-                    );
-
-                    self.emit_sub(rvalue.clone(), unit_value, loc)
-                };
-
-                self.llvmbuilder
-                    .build_store(lvalue_ptr, new_value.as_basic_value())
-                    .unwrap();
-
-                if let CIRExprKind::Load(value_ref) = &unary_expr.operand.kind {
-                    if let Some(LocalIRValue::RValue(_, _)) = self.lookup_local_ir_value(value_ref.irv_id) {
-                        self.insert_local_ir_value(
-                            value_ref.irv_id,
-                            LocalIRValue::RValue(new_value.as_basic_value(), ty.clone()),
-                        );
-                    }
-                }
-
-                new_value
-            }
-            UnaryOperator::PostIncrement => {
-                let old_value = rvalue.clone();
-                let new_value = if is_pointer {
-                    let ptr = rvalue.as_basic_value().into_pointer_value();
-                    self.emit_pointer_add(ptr, unit_int_value, ty.clone())
-                } else {
-                    let unit_value = InternalValue::new(
-                        ty.clone(),
-                        InternalValueKind::RValue(BasicValueEnum::IntValue(unit_int_value)),
-                    );
-                    self.emit_add(rvalue, unit_value, loc)
-                };
-
-                self.llvmbuilder
-                    .build_store(lvalue_ptr, new_value.as_basic_value())
-                    .unwrap();
-
-                if let CIRExprKind::Load(value_ref) = &unary_expr.operand.kind {
-                    if let Some(LocalIRValue::RValue(_, _)) = self.lookup_local_ir_value(value_ref.irv_id) {
-                        self.insert_local_ir_value(
-                            value_ref.irv_id,
-                            LocalIRValue::RValue(new_value.as_basic_value(), ty.clone()),
-                        );
-                    }
-                }
-
-                old_value
-            }
-            UnaryOperator::PostDecrement => {
-                let old_value = rvalue.clone();
-                let new_value = if is_pointer {
-                    let ptr = rvalue.as_basic_value().into_pointer_value();
-                    self.emit_pointer_sub(ptr, unit_int_value, ty.clone())
-                } else {
-                    let unit_value = InternalValue::new(
-                        ty.clone(),
-                        InternalValueKind::RValue(BasicValueEnum::IntValue(unit_int_value)),
-                    );
-                    self.emit_sub(rvalue, unit_value, loc)
-                };
-
-                self.llvmbuilder
-                    .build_store(lvalue_ptr, new_value.as_basic_value())
-                    .unwrap();
-
-                if let CIRExprKind::Load(value_ref) = &unary_expr.operand.kind {
-                    if let Some(LocalIRValue::RValue(_, _)) = self.lookup_local_ir_value(value_ref.irv_id) {
-                        self.insert_local_ir_value(
-                            value_ref.irv_id,
-                            LocalIRValue::RValue(new_value.as_basic_value(), ty.clone()),
-                        );
-                    }
-                }
-
-                old_value
-            }
-        }
-    }
-
     fn emit_infix_expr(&mut self, infix_expr: &CIRInfixExpr, loc: Loc) -> InternalValue<'ll> {
-        let lhs_lvalue = self.emit_expr(&infix_expr.lhs, &None);
-        let rhs_lvalue = self.emit_expr(&infix_expr.rhs, &None);
-
-        let mut lhs_rvalue = self.load_rvalue(lhs_lvalue.clone());
-        let mut rhs_rvalue = self.load_rvalue(rhs_lvalue.clone());
-
-        if lhs_rvalue.ty.is_integer() && rhs_rvalue.ty.is_integer() {
-            (lhs_rvalue, rhs_rvalue) = self.widen_int_pair(lhs_rvalue, rhs_rvalue);
-        }
-
-        let get_signed = || rhs_rvalue.ty.as_plain().unwrap().is_signed();
-
         match infix_expr.op {
-            InfixOperator::Add => self.emit_add(lhs_rvalue, rhs_rvalue, loc),
-            InfixOperator::Sub => self.emit_sub(lhs_rvalue, rhs_rvalue, loc),
-            InfixOperator::Mul => self.emit_mul(lhs_rvalue, rhs_rvalue, loc),
-            InfixOperator::Div => self.emit_div(lhs_rvalue, rhs_rvalue),
-            InfixOperator::Rem => self.emit_rem(lhs_rvalue, rhs_rvalue),
-            InfixOperator::LessThan => {
-                if get_signed() {
-                    self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::SLT, FloatPredicate::OLT)
-                } else {
-                    self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::ULT, FloatPredicate::OLT)
+            InfixOperator::And => {
+                return self.emit_short_circuit_and(&infix_expr.lhs, &infix_expr.rhs);
+            }
+            InfixOperator::Or => {
+                return self.emit_short_circuit_or(&infix_expr.lhs, &infix_expr.rhs);
+            }
+            _ => {
+                let lhs_lvalue = self.emit_expr(&infix_expr.lhs, &None);
+                let rhs_lvalue = self.emit_expr(&infix_expr.rhs, &None);
+
+                let mut lhs_rvalue = self.load_rvalue(lhs_lvalue.clone());
+                let mut rhs_rvalue = self.load_rvalue(rhs_lvalue.clone());
+
+                if lhs_rvalue.ty.is_integer() && rhs_rvalue.ty.is_integer() {
+                    (lhs_rvalue, rhs_rvalue) = self.widen_int_pair(lhs_rvalue, rhs_rvalue);
+                }
+
+                let get_signed = || rhs_rvalue.ty.as_plain().unwrap().is_signed();
+
+                match infix_expr.op {
+                    InfixOperator::And | InfixOperator::Or => unreachable!(),
+
+                    InfixOperator::Add => self.emit_add(lhs_rvalue, rhs_rvalue, loc),
+                    InfixOperator::Sub => self.emit_sub(lhs_rvalue, rhs_rvalue, loc),
+                    InfixOperator::Mul => self.emit_mul(lhs_rvalue, rhs_rvalue, loc),
+                    InfixOperator::Div => self.emit_div(lhs_rvalue, rhs_rvalue),
+                    InfixOperator::Rem => self.emit_rem(lhs_rvalue, rhs_rvalue),
+                    InfixOperator::LessThan => {
+                        if get_signed() {
+                            self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::SLT, FloatPredicate::OLT)
+                        } else {
+                            self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::ULT, FloatPredicate::OLT)
+                        }
+                    }
+                    InfixOperator::LessEqual => {
+                        if get_signed() {
+                            self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::SLE, FloatPredicate::OLE)
+                        } else {
+                            self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::ULE, FloatPredicate::OLE)
+                        }
+                    }
+                    InfixOperator::GreaterThan => {
+                        if get_signed() {
+                            self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::SGT, FloatPredicate::OGT)
+                        } else {
+                            self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::UGT, FloatPredicate::OGT)
+                        }
+                    }
+                    InfixOperator::GreaterEqual => {
+                        if get_signed() {
+                            self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::SGE, FloatPredicate::OGE)
+                        } else {
+                            self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::UGE, FloatPredicate::OGE)
+                        }
+                    }
+                    InfixOperator::Equal => self.emit_cmp_eq(lhs_rvalue, rhs_rvalue),
+                    InfixOperator::NotEqual => self.emit_cmp_neq(lhs_rvalue, rhs_rvalue),
+                    InfixOperator::BitwiseAnd => self.emit_bitwise_and(lhs_rvalue, rhs_rvalue),
+                    InfixOperator::BitwiseOr => self.emit_bitwise_or(lhs_rvalue, rhs_rvalue),
+                    InfixOperator::BitwiseXor => self.emit_xor(lhs_rvalue, rhs_rvalue),
+                    InfixOperator::BitwiseAndNot => self.emit_bitwise_and_not(lhs_rvalue, rhs_rvalue),
+                    InfixOperator::ShiftLeft => self.emit_shift_left(lhs_rvalue, rhs_rvalue),
+                    InfixOperator::ShiftRight => self.emit_shift_right(lhs_rvalue, rhs_rvalue),
+                    InfixOperator::NullCoalesce => self.emit_null_coalesce_operator(lhs_rvalue, rhs_rvalue),
                 }
             }
-            InfixOperator::LessEqual => {
-                if get_signed() {
-                    self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::SLE, FloatPredicate::OLE)
-                } else {
-                    self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::ULE, FloatPredicate::OLE)
-                }
-            }
-            InfixOperator::GreaterThan => {
-                if get_signed() {
-                    self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::SGT, FloatPredicate::OGT)
-                } else {
-                    self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::UGT, FloatPredicate::OGT)
-                }
-            }
-            InfixOperator::GreaterEqual => {
-                if get_signed() {
-                    self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::SGE, FloatPredicate::OGE)
-                } else {
-                    self.emit_cmp(lhs_rvalue, rhs_rvalue, IntPredicate::UGE, FloatPredicate::OGE)
-                }
-            }
-            InfixOperator::Equal => self.emit_cmp_eq(lhs_rvalue, rhs_rvalue),
-            InfixOperator::NotEqual => self.emit_cmp_neq(lhs_rvalue, rhs_rvalue),
-            InfixOperator::Or => self.emit_logical_or(lhs_rvalue, rhs_rvalue),
-            InfixOperator::NullCoalesce => self.emit_null_coalesce_operator(lhs_rvalue, rhs_rvalue),
-            InfixOperator::And => self.emit_logical_and(lhs_rvalue, rhs_rvalue),
-            InfixOperator::BitwiseAnd => self.emit_bitwise_and(lhs_rvalue, rhs_rvalue),
-            InfixOperator::BitwiseOr => self.emit_bitwise_or(lhs_rvalue, rhs_rvalue),
-            InfixOperator::BitwiseXor => self.emit_xor(lhs_rvalue, rhs_rvalue),
-            InfixOperator::BitwiseAndNot => self.emit_bitwise_and_not(lhs_rvalue, rhs_rvalue),
-            InfixOperator::ShiftLeft => self.emit_shift_left(lhs_rvalue, rhs_rvalue),
-            InfixOperator::ShiftRight => self.emit_shift_right(lhs_rvalue, rhs_rvalue),
         }
     }
 
-    fn emit_logical_or(&self, lhs_rvalue: InternalValue<'ll>, rhs_rvalue: InternalValue<'ll>) -> InternalValue<'ll> {
-        match (lhs_rvalue.as_basic_value(), rhs_rvalue.as_basic_value()) {
-            (BasicValueEnum::IntValue(mut lhs), BasicValueEnum::IntValue(mut rhs)) => {
-                if lhs_rvalue.ty.is_bool() || rhs_rvalue.ty.is_bool() {
-                    lhs = self.int_value_as_bool_i1(lhs);
-                    rhs = self.int_value_as_bool_i1(rhs);
-                }
-
-                let or_value = self.llvmbuilder.build_or(lhs, rhs, "lor").unwrap();
-
-                InternalValue::new(
-                    CIRType::Plain(PlainType::Bool),
-                    InternalValueKind::RValue(or_value.into()),
-                )
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn emit_null_coalesce_operator(&self, lhs_rvalue: InternalValue<'ll>, rhs_rvalue: InternalValue<'ll>) -> InternalValue<'ll> {
+    fn emit_null_coalesce_operator(
+        &self,
+        lhs_rvalue: InternalValue<'ll>,
+        rhs_rvalue: InternalValue<'ll>,
+    ) -> InternalValue<'ll> {
         match (lhs_rvalue.as_basic_value(), rhs_rvalue.as_basic_value()) {
             (BasicValueEnum::PointerValue(lhs), BasicValueEnum::PointerValue(rhs)) => {
                 self.emit_null_coalescing_pointers(lhs, rhs, lhs_rvalue.ty.clone())
@@ -897,23 +741,126 @@ impl<'ll> CodeGenIRBuilder<'ll> {
         )
     }
 
-    fn emit_logical_and(&self, lhs_rvalue: InternalValue<'ll>, rhs_rvalue: InternalValue<'ll>) -> InternalValue<'ll> {
-        match (lhs_rvalue.as_basic_value(), rhs_rvalue.as_basic_value()) {
-            (BasicValueEnum::IntValue(mut lhs), BasicValueEnum::IntValue(mut rhs)) => {
-                if lhs_rvalue.ty.is_bool() || rhs_rvalue.ty.is_bool() {
-                    lhs = self.int_value_as_bool_i1(lhs);
-                    rhs = self.int_value_as_bool_i1(rhs);
-                }
+    fn emit_short_circuit_and(&mut self, lhs_expr: &CIRExpr, rhs_expr: &CIRExpr) -> InternalValue<'ll> {
+        let cur_fn = self.cur_func.unwrap();
 
-                let and_value = self.llvmbuilder.build_and(lhs, rhs, "land").unwrap();
+        let cont_block = self.llvm_ctx.append_basic_block(cur_fn, "and_cont");
+        let rhs_block = self.llvm_ctx.append_basic_block(cur_fn, "and_rhs");
+        let false_block = self.llvm_ctx.append_basic_block(cur_fn, "and_false");
 
-                InternalValue::new(
-                    CIRType::Plain(PlainType::Bool),
-                    InternalValueKind::RValue(and_value.into()),
-                )
+        let result_alloca = self
+            .llvmbuilder
+            .build_alloca(self.llvm_ctx.bool_type(), "and_result_storage")
+            .unwrap();
+
+        let lhs_lvalue = self.emit_expr(lhs_expr, &None);
+        let lhs_rvalue = self.load_rvalue(lhs_lvalue);
+        let lhs_bool = self.int_value_as_bool_i1(lhs_rvalue.as_basic_value().into_int_value());
+
+        if let Some(cur_block) = &self.blockreg.cur_block {
+            if cur_block.get_terminator().is_none() {
+                self.blockreg.cur_block = None;
+                self.llvmbuilder
+                    .build_conditional_branch(lhs_bool, rhs_block, false_block)
+                    .unwrap();
             }
-            _ => unreachable!(),
         }
+
+        self.emit_block(false_block);
+        let false_value = self.llvm_ctx.bool_type().const_int(0, false);
+        self.llvmbuilder.build_store(result_alloca, false_value).unwrap();
+        if let Some(cur_block) = &self.blockreg.cur_block {
+            if cur_block.get_terminator().is_none() {
+                self.blockreg.cur_block = None;
+                self.llvmbuilder.build_unconditional_branch(cont_block).unwrap();
+            }
+        }
+
+        self.emit_block(rhs_block);
+        let rhs_lvalue = self.emit_expr(rhs_expr, &None);
+        let rhs_rvalue = self.load_rvalue(rhs_lvalue);
+        let rhs_bool = self.int_value_as_bool_i1(rhs_rvalue.as_basic_value().into_int_value());
+
+        self.llvmbuilder.build_store(result_alloca, rhs_bool).unwrap();
+
+        if let Some(cur_block) = &self.blockreg.cur_block {
+            if cur_block.get_terminator().is_none() {
+                self.blockreg.cur_block = None;
+                self.llvmbuilder.build_unconditional_branch(cont_block).unwrap();
+            }
+        }
+
+        self.emit_block(cont_block);
+        let result = self
+            .llvmbuilder
+            .build_load(self.llvm_ctx.bool_type(), result_alloca, "and_result")
+            .unwrap();
+
+        InternalValue::new(
+            CIRType::Plain(PlainType::Bool),
+            InternalValueKind::RValue(result.into()),
+        )
+    }
+
+    fn emit_short_circuit_or(&mut self, lhs_expr: &CIRExpr, rhs_expr: &CIRExpr) -> InternalValue<'ll> {
+        let cur_fn = self.cur_func.unwrap();
+
+        let cont_block = self.llvm_ctx.append_basic_block(cur_fn, "or_cont");
+        let rhs_block = self.llvm_ctx.append_basic_block(cur_fn, "or_rhs");
+        let true_block = self.llvm_ctx.append_basic_block(cur_fn, "or_true");
+
+        let result_alloca = self
+            .llvmbuilder
+            .build_alloca(self.llvm_ctx.bool_type(), "or_result_storage")
+            .unwrap();
+
+        let lhs_lvalue = self.emit_expr(lhs_expr, &None);
+        let lhs_rvalue = self.load_rvalue(lhs_lvalue);
+        let lhs_bool = self.int_value_as_bool_i1(lhs_rvalue.as_basic_value().into_int_value());
+
+        if let Some(cur_block) = &self.blockreg.cur_block {
+            if cur_block.get_terminator().is_none() {
+                self.blockreg.cur_block = None;
+                self.llvmbuilder
+                    .build_conditional_branch(lhs_bool, true_block, rhs_block)
+                    .unwrap();
+            }
+        }
+
+        self.emit_block(true_block);
+        let true_value = self.llvm_ctx.bool_type().const_int(1, false);
+        self.llvmbuilder.build_store(result_alloca, true_value).unwrap();
+        if let Some(cur_block) = &self.blockreg.cur_block {
+            if cur_block.get_terminator().is_none() {
+                self.blockreg.cur_block = None;
+                self.llvmbuilder.build_unconditional_branch(cont_block).unwrap();
+            }
+        }
+
+        self.emit_block(rhs_block);
+        let rhs_lvalue = self.emit_expr(rhs_expr, &None);
+        let rhs_rvalue = self.load_rvalue(rhs_lvalue);
+        let rhs_bool = self.int_value_as_bool_i1(rhs_rvalue.as_basic_value().into_int_value());
+
+        self.llvmbuilder.build_store(result_alloca, rhs_bool).unwrap();
+
+        if let Some(cur_block) = &self.blockreg.cur_block {
+            if cur_block.get_terminator().is_none() {
+                self.blockreg.cur_block = None;
+                self.llvmbuilder.build_unconditional_branch(cont_block).unwrap();
+            }
+        }
+
+        self.emit_block(cont_block);
+        let result = self
+            .llvmbuilder
+            .build_load(self.llvm_ctx.bool_type(), result_alloca, "or_result")
+            .unwrap();
+
+        InternalValue::new(
+            CIRType::Plain(PlainType::Bool),
+            InternalValueKind::RValue(result.into()),
+        )
     }
 
     fn emit_xor(&self, lhs_rvalue: InternalValue<'ll>, rhs_rvalue: InternalValue<'ll>) -> InternalValue<'ll> {
@@ -934,6 +881,7 @@ impl<'ll> CodeGenIRBuilder<'ll> {
         match (lhs_rvalue.as_basic_value(), rhs_rvalue.as_basic_value()) {
             (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
                 let and_value = self.llvmbuilder.build_and(lhs, rhs, "xor").unwrap();
+
                 InternalValue::new(
                     CIRType::Plain(PlainType::Bool),
                     InternalValueKind::RValue(and_value.into()),
@@ -998,7 +946,7 @@ impl<'ll> CodeGenIRBuilder<'ll> {
             (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
                 let signed = rhs_rvalue.ty.as_plain().unwrap().is_signed();
 
-                let shift_value = self.llvmbuilder.build_right_shift(lhs, rhs, signed, "lshift").unwrap();
+                let shift_value = self.llvmbuilder.build_right_shift(lhs, rhs, signed, "rshift").unwrap();
 
                 InternalValue::new(
                     CIRType::Plain(PlainType::Bool),
@@ -1065,7 +1013,8 @@ impl<'ll> CodeGenIRBuilder<'ll> {
 
         self.llvmbuilder.position_at_end(panic_block);
 
-        let msg_expr = cir_string_literal("integer overflow", loc);
+        let msg_expr = cir_string_literal(&format!("integer overflow in instruction '{}'", op), loc);
+
         self.emit_intrinsic_panic(&[msg_expr], loc);
 
         self.emit_block(cont_block);
@@ -1084,18 +1033,21 @@ impl<'ll> CodeGenIRBuilder<'ll> {
     ) -> InternalValue<'ll> {
         match (lhs_rvalue.as_basic_value(), rhs_rvalue.as_basic_value()) {
             (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
-                if self.profile == cyrusc_internal::compiler_options::CompilerOption_Profile::Debug {
+                if self.profile == CompilerOption_Profile::Debug {
                     let is_signed = lhs_rvalue.ty.is_signed_integer();
+
                     self.emit_checked_int_op("add", lhs, rhs, is_signed, lhs_rvalue.ty.clone(), loc)
                 } else {
                     let basic_value =
                         BasicValueEnum::IntValue(self.llvmbuilder.build_int_add(lhs, rhs, "add").unwrap());
+
                     InternalValue::new(lhs_rvalue.ty.clone(), InternalValueKind::RValue(basic_value))
                 }
             }
             (BasicValueEnum::FloatValue(lhs), BasicValueEnum::FloatValue(rhs)) => {
                 let basic_value =
                     BasicValueEnum::FloatValue(self.llvmbuilder.build_float_add(lhs, rhs, "add").unwrap());
+
                 InternalValue::new(lhs_rvalue.ty.clone(), InternalValueKind::RValue(basic_value))
             }
             (BasicValueEnum::PointerValue(ptr), BasicValueEnum::IntValue(index)) => {
@@ -1116,7 +1068,7 @@ impl<'ll> CodeGenIRBuilder<'ll> {
     ) -> InternalValue<'ll> {
         match (lhs_rvalue.as_basic_value(), rhs_rvalue.as_basic_value()) {
             (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
-                if self.profile == cyrusc_internal::compiler_options::CompilerOption_Profile::Debug {
+                if self.profile == CompilerOption_Profile::Debug {
                     let is_signed = lhs_rvalue.ty.is_signed_integer();
 
                     self.emit_checked_int_op("sub", lhs, rhs, is_signed, lhs_rvalue.ty.clone(), loc)
@@ -1248,18 +1200,21 @@ impl<'ll> CodeGenIRBuilder<'ll> {
     ) -> InternalValue<'ll> {
         match (lhs_rvalue.as_basic_value(), rhs_rvalue.as_basic_value()) {
             (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
-                if self.profile == cyrusc_internal::compiler_options::CompilerOption_Profile::Debug {
+                if self.profile == CompilerOption_Profile::Debug {
                     let is_signed = lhs_rvalue.ty.is_signed_integer();
+
                     self.emit_checked_int_op("mul", lhs, rhs, is_signed, lhs_rvalue.ty.clone(), loc)
                 } else {
                     let basic_value =
                         BasicValueEnum::IntValue(self.llvmbuilder.build_int_mul(lhs, rhs, "mul").unwrap());
+
                     InternalValue::new(lhs_rvalue.ty.clone(), InternalValueKind::RValue(basic_value))
                 }
             }
             (BasicValueEnum::FloatValue(lhs), BasicValueEnum::FloatValue(rhs)) => {
                 let basic_value =
                     BasicValueEnum::FloatValue(self.llvmbuilder.build_float_mul(lhs, rhs, "mul").unwrap());
+
                 InternalValue::new(lhs_rvalue.ty.clone(), InternalValueKind::RValue(basic_value))
             }
             _ => unreachable!(),
@@ -1269,13 +1224,22 @@ impl<'ll> CodeGenIRBuilder<'ll> {
     fn emit_div(&self, lhs_rvalue: InternalValue<'ll>, rhs_rvalue: InternalValue<'ll>) -> InternalValue<'ll> {
         match (lhs_rvalue.as_basic_value(), rhs_rvalue.as_basic_value()) {
             (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
-                let basic_value =
-                    BasicValueEnum::IntValue(self.llvmbuilder.build_int_signed_div(lhs, rhs, "div").unwrap());
+                let is_signed = lhs_rvalue.ty.is_signed_integer();
+
+                let basic_value = {
+                    if is_signed {
+                        BasicValueEnum::IntValue(self.llvmbuilder.build_int_signed_div(lhs, rhs, "div").unwrap())
+                    } else {
+                        BasicValueEnum::IntValue(self.llvmbuilder.build_int_unsigned_div(lhs, rhs, "div").unwrap())
+                    }
+                };
+
                 InternalValue::new(lhs_rvalue.ty.clone(), InternalValueKind::RValue(basic_value))
             }
             (BasicValueEnum::FloatValue(lhs), BasicValueEnum::FloatValue(rhs)) => {
                 let basic_value =
                     BasicValueEnum::FloatValue(self.llvmbuilder.build_float_div(lhs, rhs, "div").unwrap());
+
                 InternalValue::new(lhs_rvalue.ty.clone(), InternalValueKind::RValue(basic_value))
             }
             _ => unreachable!(),
@@ -1287,17 +1251,15 @@ impl<'ll> CodeGenIRBuilder<'ll> {
             (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
                 let is_signed = rhs_rvalue.ty.is_signed_integer();
 
-                if is_signed {
-                    let basic_value =
-                        BasicValueEnum::IntValue(self.llvmbuilder.build_int_signed_rem(lhs, rhs, "rem").unwrap());
+                let basic_value = {
+                    if is_signed {
+                        BasicValueEnum::IntValue(self.llvmbuilder.build_int_signed_rem(lhs, rhs, "rem").unwrap())
+                    } else {
+                        BasicValueEnum::IntValue(self.llvmbuilder.build_int_unsigned_rem(lhs, rhs, "rem").unwrap())
+                    }
+                };
 
-                    InternalValue::new(lhs_rvalue.ty.clone(), InternalValueKind::RValue(basic_value))
-                } else {
-                    let basic_value =
-                        BasicValueEnum::IntValue(self.llvmbuilder.build_int_unsigned_rem(lhs, rhs, "rem").unwrap());
-
-                    InternalValue::new(lhs_rvalue.ty.clone(), InternalValueKind::RValue(basic_value))
-                }
+                InternalValue::new(lhs_rvalue.ty.clone(), InternalValueKind::RValue(basic_value))
             }
             (BasicValueEnum::FloatValue(lhs), BasicValueEnum::FloatValue(rhs)) => {
                 let basic_value =
@@ -2119,11 +2081,11 @@ impl<'ll> CodeGenIRBuilder<'ll> {
 
         llvm_args.append(&mut normal_args);
 
-        let llvm_fn_ty = self.emit_func_type(func_type.clone());
+        let llvm_func_type = self.emit_func_type(func_type.clone());
 
         let call_site = self
             .llvmbuilder
-            .build_indirect_call(llvm_fn_ty, fn_ptr, &llvm_args, "ifc.call")
+            .build_indirect_call(llvm_func_type, fn_ptr, &llvm_args, "ifc.call")
             .unwrap();
 
         // Attach ABI call attributes
@@ -2355,6 +2317,7 @@ impl<'ll> CodeGenIRBuilder<'ll> {
             // coerce back from abi return type to actual return type
             let actual_return_type: BasicTypeEnum<'ll> =
                 self.emit_type(*cir_func_type.ret_type.clone()).try_into().unwrap();
+
             basic_value = self.intrinsic_coerce_through_alloca(basic_value, actual_return_type, "coerce_ret");
 
             InternalValue::new(func_call.ret_type.clone(), InternalValueKind::RValue(basic_value))

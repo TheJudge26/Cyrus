@@ -7,11 +7,28 @@ pub struct Slice<T> {
     ptr: T*,
     len: usize,
 
-    pub inline fn new(const ptr: T*, const len: usize) Self {
+    pub inline fn new(ptr: T*, len: usize) Self {
         return Self { ptr, len };
     }
 
-    pub inline fn get(&self, const index: usize) Option<T*> {
+    pub inline fn ptr(self: Self*) T* {
+        return self->ptr;
+    }
+
+    pub inline fn ptr_const(self: const Self*) const T* {
+        return self->ptr;
+    }
+
+    pub inline fn get(self: Self*, index: usize) Option<T> {
+        if (index >= self->len) {
+            return .None;
+        }
+
+        return .Some(*(self->ptr + index));
+    }
+    
+
+    pub inline fn get_ref(self: Self*, index: usize) Option<T*> {
         if (index >= self->len) {
             return .None;
         }
@@ -19,7 +36,7 @@ pub struct Slice<T> {
         return .Some(self->ptr + index);
     }
     
-    pub inline fn get_const(&const self, const index: usize) Option<const T*> {
+    pub inline fn get_const(self: const Self*, index: usize) Option<const T*> {
         if (index >= self->len) {
             return .None;
         }
@@ -27,15 +44,15 @@ pub struct Slice<T> {
         return .Some(self->ptr + index);
     }
     
-    pub inline fn range(&const self, const start: usize, const end: usize) Self {
+    pub inline fn range(self: const Self*, start: usize, end: usize) Self {
         return Self { ptr: self->ptr + start, len: end - start };
     }
 
-    pub inline fn range_inclusive(&const self, const start: usize, const end: usize) Self {
+    pub inline fn range_inclusive(self: const Self*, start: usize, end: usize) Self {
         return Self { ptr: self->ptr + start, len: end - start + 1 };
     }
 
-    pub inline fn len(&const self) usize {
+    pub inline fn len(self: const Self*) usize {
         return self->len;
     }
 }

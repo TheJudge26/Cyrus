@@ -9,7 +9,7 @@ use crate::{
 use cyrusc_ast::{
     abi::ReprKind,
     modifiers::{EnumModifiers, FuncModifiers, GlobalVarModifiers, StructModifiers, UnionModifiers},
-    operators::{InfixOperator, PrefixOperator, UnaryOperator},
+    operators::{InfixOperator, PrefixOperator},
 };
 use cyrusc_source_loc::Loc;
 use cyrusc_tokens::literals::{IntLiteralKind, Integer};
@@ -78,7 +78,6 @@ pub enum CIRExprKind {
     Literal(CIRLiteral),
     Prefix(CIRPrefixExpr),
     Infix(CIRInfixExpr),
-    Unary(CIRUnaryExpr),
     SizeOf(CIRSizeOfExpr),
     Assign(CIRAssignExpr),
     AddrOf(CIRAddrOfExpr),

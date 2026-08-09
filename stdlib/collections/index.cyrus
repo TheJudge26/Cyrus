@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 The Cyrus Language
 
+import std::math::checked{
+    checked_mul,
+    checked_add,
+};
 import std::libc{memmove, malloc};
+import std::iterator{Iterator};
 import std::mem{Allocator};
 import std::option{Option};
-import std::iterator{Iterator};
 
-const initial_array_capacity: usize = 16;
-
-pub struct Vector<T> {
+pub struct Vec<T> {
     allocator: Allocator,
     data: T*,
     cap: usize,
@@ -16,8 +18,7 @@ pub struct Vector<T> {
 
     /// Create a new array using a specific allocator.
     pub inline fn new(allocator: Allocator) Self {
-        const cap = initial_array_capacity;
-        const data: T* = allocator.alloc(cap * @sizeof(T));
+        const data: T* = allocator.alloc(@sizeof(T));
         if (!data) {
             @panic("allocation failed");
         }
@@ -25,16 +26,18 @@ pub struct Vector<T> {
         return Self {
             allocator,
             data,
-            cap,
+            cap: 1,
             len: 0,
         };
     }
 
     /// Pre-allocate memory to avoid initial reallocations.
-    pub inline fn with_capacity(allocator: Allocator, const cap: usize) Self {
+    pub inline fn with_capacity(allocator: Allocator, cap: usize) Self {
         @assert(cap != 0, "initial capacity cannot be zero");
 
-        const data: T* = allocator.alloc(cap * @sizeof(T));
+        const size = checked_mul(cap, @sizeof(T)).unwrap();
+
+        const data: T* = allocator.alloc(size);
         if (data == null) {
             @panic("initial allocation failed");
         }
@@ -42,27 +45,26 @@ pub struct Vector<T> {
         return Self { allocator, data, cap, len: 0 };
     }
 
-    pub inline fn extend(&const self, const other: Self*) {
+    pub fn extend(self: const Self*, other: const Self*) {
         if (self == other) {
-            var original_len = self->len;
+            const original_len = self->len;
 
             self->reserve(original_len);
-            
+
             memmove(
                 self->data + original_len,
                 self->data,
-                original_len * @sizeof(T)
+                checked_mul(original_len, @sizeof(T)).unwrap()
             );
 
-            self->len += original_len;
-
+            self->len = checked_add(self->len, original_len).unwrap();
             return;
         }
 
         self->extend_from_ptr(other->data, other->len);
     }
 
-    pub inline fn extend_from_ptr(&self, const ptr: T*, const count: usize) {
+    pub fn extend_from_ptr(self: Self*, ptr: T*, count: usize) {
         if (count == 0) {
             return;
         }
@@ -74,22 +76,22 @@ pub struct Vector<T> {
         memmove(
             self->data + old_len,
             ptr,
-            count * @sizeof(T)
+            checked_mul(count, @sizeof(T)).unwrap()
         );
 
-        self->len = old_len + count;
+        self->len = checked_add(old_len, count).unwrap();
     }
 
     /// Deep copy of the array. 
-    pub inline fn clone(&const self, const allocator: Allocator) Self {
-        var vec: Vector<T> = Vector.with_capacity(allocator, self->len);
+    pub inline fn clone(self: const Self*, allocator: Allocator) Self {
+        var vec: Vec<T> = Vec.with_capacity(allocator, self->len);
         vec.extend_from_ptr(self->data, self->len);
         return vec;
     }
 
     // TODO: from<V>(value: V)
 
-    pub inline fn resize(&self, const len: usize, const value: T) {
+    pub fn resize(self: Self*, len: usize, value: T) {
         if (len > self->len) {
             self->reserve(len - self->len);
 
@@ -101,7 +103,8 @@ pub struct Vector<T> {
         }
     }
 
-    pub inline fn reserve(&self, const extra: usize) {
+    pub fn reserve(self: Self*, extra: usize) {
+        // const required = checked_add(self->len, extra).unwrap();
         const required = self->len + extra;
 
         if (required < self->len) {
@@ -115,24 +118,24 @@ pub struct Vector<T> {
         self->grow(required);
     }
 
-    pub inline fn push(&self, value: T) {
+    pub fn push(self: Self*, value: T) {
         self->reserve(1);
 
         self->data[self->len] = value;
-        self->len++;
+        self->len += 1;
     }
 
-    pub inline fn pop(&self) T {
+    pub fn pop(self: Self*) T {
         if (self->len == 0) {
             @panic("cannot pop from empty array");
         }
         
         const ch = self->data[self->len];
-        self->len--;
+        self->len -= 1;
         return ch;
     }
 
-    pub inline fn insert(&self, index: usize, value: T) {
+    pub fn insert(self: Self*, index: usize, value: T) {
         if (index > self->len) {
             @panic("insertion index out of bounds");
         }
@@ -150,8 +153,8 @@ pub struct Vector<T> {
     }
 
     /// Find the index of a value (Linear Search).
-    pub inline fn index(&const self, const value: T) Option<usize> {
-        for (var i: usize = 0; i < self->len; i++) {
+    pub fn index(self: const Self*, value: T) Option<usize> {
+        for (var i: usize = 0; i < self->len; i += 1) {
             if (self->data[i] == value) {
                 return .Some(i);
             }
@@ -160,11 +163,7 @@ pub struct Vector<T> {
         return .None;
     }
 
-    pub inline fn get_unchecked(&const self, const index: usize) T* {
-        return self->data + index;
-    }
-
-    pub inline fn get(&const self, const index: usize) Option<T> {
+    pub fn get(self: const Self*, index: usize) Option<T> {
         if (index >= self->len) {
             return .None;
         }
@@ -172,7 +171,7 @@ pub struct Vector<T> {
         return .Some(*(self->data + index));
     }
 
-    pub inline fn get_ref(&const self, const index: usize) Option<T*> {
+    pub inline fn get_ref(self: const Self*, index: usize) Option<T*> {
         if (index >= self->len) {
             return .None;
         }
@@ -180,9 +179,13 @@ pub struct Vector<T> {
         return .Some(self->data + index);
     }
 
-    pub inline fn contains(&const self, const value: T) bool {
+    pub inline fn get_unchecked(self: const Self*, index: usize) T* {
+        return self->data + index;
+    }
+
+    pub fn contains(self: const Self*, value: T) bool {
         // linear lookup
-        for (var i: usize = 0; i < self->len; i++) {
+        for (var i: usize = 0; i < self->len; i += 1) {
             if (self->data[i] == value) {
                 return true;
             }
@@ -191,27 +194,7 @@ pub struct Vector<T> {
         return false;
     }
 
-    pub inline fn len(&const self) usize {
-        return self->len;
-    }
-
-    pub inline fn cap(&const self) usize {
-        return self->cap;
-    }
-
-    pub inline fn is_empty(&const self) bool {
-        return self->len == 0;
-    }
-
-    pub inline fn clear(&self) {
-        self->len = 0;
-    }
-
-    pub inline fn reset(&self) {
-        self->len = 0;
-    }
-
-    pub inline fn remove(&self, index: usize) T {
+    pub fn remove(self: Self*, index: usize) T {
         if (index >= self->len) {
             @panic("index out of bounds");
         }
@@ -225,31 +208,44 @@ pub struct Vector<T> {
 
         memmove(dst, src, count * @sizeof(T));
 
-        self->len--;
+        self->len -= 1;
 
         return value;
     }
 
-    pub inline fn data(&self) T* {
+    pub inline fn len(self: const Self*) usize {
+        return self->len;
+    }
+
+    pub inline fn cap(self: const Self*) usize {
+        return self->cap;
+    }
+
+    pub inline fn is_empty(self: const Self*) bool {
+        return self->len == 0;
+    }
+
+    pub inline fn clear(self: Self*) {
+        self->len = 0;
+    }
+
+    pub inline fn reset(self: Self*) {
+        self->len = 0;
+    }
+
+    pub inline fn data(self: Self*) T* {
         return self->data;
     }
 
-    pub inline fn data_const(&const self) const T* {
+    pub inline fn data_const(self: const Self*) const T* {
         return self->data;
     }
 
-    // FIXME
-    // pub inline fn iter(&const self) Iterator<T> {
-    //     const vector_iter: VectorIter<T> = VectorIter {
-    //         vector: self,
-    //         index: 0
-    //     };
-        
-    //     return dynamic vector_iter;
-    //     // @todo();
-    // }
+    pub inline fn into_iter(self: const Self*) VecIter<T> {
+        return struct { vec: self, idx: 0 };
+    }
 
-    pub inline fn free(&self) {
+    pub inline fn free(self: Self*) {
         if (self->data != null) {
             self->allocator.free(self->data);
             self->data = null;
@@ -260,21 +256,24 @@ pub struct Vector<T> {
 
     // internals 
 
-    fn grow(&self, min_cap: usize) {
+    fn grow(self: Self*, min_cap: usize) {
         var new_cap: usize;
 
         if (self->cap == 0) {
-            new_cap = initial_array_capacity;
+            new_cap = 1;
         } else {
             new_cap = self->cap;
         }
 
         // exponential growth (2x)
         while (new_cap < min_cap) {
-            new_cap *= 2;
+            new_cap = checked_mul(new_cap, 2).unwrap();
         }
 
-        const new_data: T* = self->allocator.realloc(self->data, new_cap * @sizeof(T));
+        const new_data: T* = self->allocator.realloc(
+            self->data,
+            new_cap * @sizeof(T)
+        );
 
         if (new_data == null) {
             @panic("realloc failed");
@@ -285,38 +284,41 @@ pub struct Vector<T> {
     }
 }
 
-// FIXME
-// pub struct VectorIter<T> : Iterator<T> {
-//     vector: Vector<T>*;
-//     index: usize;
+pub struct VecIter<T> : Iterator<T> {
+    vec: const Vec<T>*,
+    idx: usize,
 
-//     pub fn new(const vector: Vector<T>*) Self {
-//         return Self { vector, index: 0 };
-//     }
+    pub fn next(self: Self*) Option<T*> {
+        if (self->idx + 1 > self->vec->len()) {
+            return .None;
+        }
 
-//     pub fn next(&self) T* {
-//         const data = self->vector.data();
-//         const item = data[self->idx];
-//         self->idx++;
-//         return item;
-//     }
-
-//     pub fn next_const(&self) const T* {
-//         const data = self->vector.data();
-//         const item = data[self->idx];
-//         self->idx++;
-//         return item;
-//     }
-// }
-
-pub struct Map<K, V> {
-    entries: Vector<(K, V)>,
-
-    pub inline fn new(const allocator: Allocator) Self {
-        return Self { entries: Vector.new(allocator) };
+        const data = self->vec->data();
+        const item = &data[self->idx];
+        self->idx += 1;
+        return .Some(item);
     }
 
-    pub fn set(&self, const key: K, const value: V) bool {
+    pub fn next_const(self: const Self*) Option<const T*> {
+        if (self->idx + 1 > self->vec->len()) {
+            return .None;
+        }
+        
+        const data = self->vec->data();
+        const item = &data[self->idx];
+        self->idx += 1;
+        return .Some(item);
+    }
+}
+
+pub struct Map<K, V> {
+    entries: Vec<(K, V)>,
+
+    pub inline fn new(allocator: Allocator) Self {
+        return Self { entries: Vec.new(allocator) };
+    }
+
+    pub fn set(self: Self*, key: K, value: V) bool {
         if (self->get(key).is_some()) {
             return false;
         }
@@ -325,12 +327,12 @@ pub struct Map<K, V> {
         return true;
     }
 
-    pub fn get(&const self, const key: K) Option<V> {
+    pub fn get(self: const Self*, key: K) Option<V> {
         const len = self->entries.len();
         const data = self->entries.data_const();
 
         // linear search
-        for (var i: usize = 0; i < len; i++) {
+        for (var i: usize = 0; i < len; i += 1) {
             const item = data[i];
             
             if (item.0 == key) {
@@ -341,7 +343,7 @@ pub struct Map<K, V> {
         return .None;
     }
 
-    pub inline fn free(&self) {
+    pub inline fn free(self: Self*) {
         self->entries.free();
     }
 }

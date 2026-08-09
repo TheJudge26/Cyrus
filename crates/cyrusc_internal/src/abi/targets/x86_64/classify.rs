@@ -4,17 +4,17 @@
 use crate::{
     abi::{
         args::{ABIArgAttrs, ABIArgInfo, ABIArgKind, ABIFunctionInfo, ABIRetInfo, ABIRetInfoKind, ExpandKind},
-        helpers::{Registers, cir_type_to_abi_type, is_cir_type_abi_aggregate},
+        helpers::{Registers, is_cir_type_aggregate},
         target::{ABITargetInfo, ABITargetOS, RegisterClass, TargetABI},
-        types::{ABIFloatKind, ABIType},
     },
     cir::{
         typectx::CIRTypeContext,
-        types::{CIRArrayType, CIRFuncType, CIRStructType, CIRType, CIRUnionType},
+        types::{CIRArrayType, CIRFuncType, CIRStructType, CIRType, CIRUnionType, CIRVectorType},
     },
     is_integer_type,
 };
 use cyrusc_ast::abi::CallConv;
+use cyrusc_source_loc::{FileID, Loc};
 use cyrusc_typed_ast::types::PlainType;
 use std::sync::Arc;
 
@@ -42,13 +42,12 @@ impl X86_64 {
 
     fn abi_arg_info_indirect_result(&self, ty: &CIRType, free_int_regs: u32) -> ABIArgInfo {
         // if this is a scalar LLVM value then assume LLVM will pass it in the right place naturally
-        if !is_cir_type_abi_aggregate(ty) {
+        if !is_cir_type_aggregate(ty) {
             if ty.is_integer_or_bool() {
-                let abi_ty = cir_type_to_abi_type(self.tctx.clone(), ty);
                 let is_signed = ty.is_signed_integer();
 
                 return ABIArgInfo {
-                    kind: ABIArgKind::DirectCoerce { ty: abi_ty },
+                    kind: ABIArgKind::DirectCoerce { ty: ty.clone() },
                     attrs: ABIArgAttrs {
                         zero_ext: !is_signed,
                         sign_ext: is_signed,
@@ -73,7 +72,7 @@ impl X86_64 {
             if align <= 8 && size <= 8 {
                 return ABIArgInfo {
                     kind: ABIArgKind::DirectCoerce {
-                        ty: ABIType::Integer(64),
+                        ty: CIRType::Plain(PlainType::Int64),
                     },
                     attrs: ABIArgAttrs::default(),
                     param_index_start: 0,
@@ -84,10 +83,11 @@ impl X86_64 {
 
         if align < 8 {
             // realigned indirect (with specified alignment)
-            let abi_type = cir_type_to_abi_type(self.tctx.clone(), ty);
-
             ABIArgInfo {
-                kind: ABIArgKind::Indirect { align: 8, ty: abi_type },
+                kind: ABIArgKind::Indirect {
+                    align: 8,
+                    ty: ty.clone(),
+                },
                 attrs: ABIArgAttrs {
                     by_val: true,
                     ..Default::default()
@@ -97,10 +97,8 @@ impl X86_64 {
             }
         } else {
             // regular byval indirect
-            let abi_type = cir_type_to_abi_type(self.tctx.clone(), ty);
-
             ABIArgInfo {
-                kind: ABIArgKind::Indirect { align, ty: abi_type },
+                kind: ABIArgKind::Indirect { align, ty: ty.clone() },
                 attrs: ABIArgAttrs {
                     by_val: true,
                     ..Default::default()
@@ -112,7 +110,7 @@ impl X86_64 {
     }
 
     // https://github.com/llvm/llvm-project/blob/a08cc6e0d5e3fa653649a7826f1ffafc2b3ea2dd/clang/lib/CodeGen/Targets/X86.cpp#L2486
-    fn get_int_type_at_offset(&self, ty: &CIRType, offset: u32, source_type: &CIRType, source_offset: u32) -> ABIType {
+    fn get_int_type_at_offset(&self, ty: &CIRType, offset: u32, source_type: &CIRType, source_offset: u32) -> CIRType {
         match ty {
             CIRType::Plain(plain_type) => match plain_type {
                 PlainType::UIntPtr
@@ -122,7 +120,7 @@ impl X86_64 {
                 | PlainType::Int64
                 | PlainType::UInt64 => {
                     if offset != 0 {
-                        return cir_type_to_abi_type(self.tctx.clone(), ty);
+                        return ty.clone();
                     }
                 }
 
@@ -139,7 +137,7 @@ impl X86_64 {
                         let layout = self.tctx.layout_of(ty);
 
                         if self.bits_contain_no_user_data(source_type, source_offset + layout.size, source_offset + 8) {
-                            return cir_type_to_abi_type(self.tctx.clone(), ty);
+                            return ty.clone();
                         }
                     }
                 }
@@ -159,7 +157,7 @@ impl X86_64 {
             }
             CIRType::Pointer(_) | CIRType::FuncType(_) => {
                 if offset == 0 {
-                    return cir_type_to_abi_type(self.tctx.clone(), ty);
+                    return ty.clone();
                 }
             }
             CIRType::Struct(type_id) => {
@@ -175,12 +173,15 @@ impl X86_64 {
                 let element_offset = (offset / element_layout.size) * element_layout.size;
                 return self.get_int_type_at_offset(element_ty, offset - element_offset, source_type, source_offset);
             }
+            CIRType::Vector(_) => {
+                unimplemented!("not supported in language yet");
+            }
             CIRType::Dynamic(_) => {
                 if offset < 8 {
-                    return ABIType::Pointer; // data_ptr (first 8 bytes)
+                    return CIRType::void_ptr(); // data_ptr (first 8 bytes)
                 }
                 if offset < 16 {
-                    return ABIType::Pointer; // vtable_ptr (next 8 bytes)
+                    return CIRType::void_ptr(); // vtable_ptr (next 8 bytes)
                 }
             }
             CIRType::Union(_) | CIRType::Enum(_) => {
@@ -194,10 +195,10 @@ impl X86_64 {
 
         if remaining_bytes > 8 {
             // fits in eightbyte register
-            ABIType::Integer(64)
+            CIRType::Plain(PlainType::Int64)
         } else {
             // span across multiple registers
-            ABIType::Integer((layout.size - source_offset) * 8)
+            CIRType::Plain(PlainType::map_integer_size_to_type((layout.size - source_offset) as usize).unwrap())
         }
     }
 
@@ -251,9 +252,9 @@ impl X86_64 {
         None
     }
 
-    fn get_fp_type_at_offset(&self, ty: &CIRType, offset: u32) -> Option<ABIType> {
+    fn get_fp_type_at_offset(&self, ty: &CIRType, offset: u32) -> Option<CIRType> {
         if offset == 0 && ty.is_float() {
-            return Some(cir_type_to_abi_type(self.tctx.clone(), ty));
+            return Some(ty.clone());
         }
 
         if let CIRType::Struct(id) = ty {
@@ -287,67 +288,77 @@ impl X86_64 {
         offset: u32,
         source_type: &CIRType,
         source_offset: u32,
-    ) -> Option<ABIType> {
-        let abi_float_type = self.get_fp_type_at_offset(ty, offset)?;
-
-        let float_kind = match abi_float_type {
-            ABIType::Float(kind) => kind,
-            _ => return Some(ABIType::Float(ABIFloatKind::F64)), // fallback
+    ) -> Option<CIRType> {
+        let Some(float_type) = self.get_fp_type_at_offset(ty, offset)?.as_plain() else {
+            return Some(CIRType::Plain(PlainType::Float64));
         };
 
-        if float_kind == ABIFloatKind::F64 {
-            return Some(ABIType::Float(ABIFloatKind::F64));
+        if float_type == PlainType::Float64 {
+            return Some(CIRType::Plain(PlainType::Float64));
+        }
+
+        // f128 uses SSE + SSEUP
+        if float_type == PlainType::Float128 {
+            // f128 needs 16-byte alignment
+            if (source_offset + offset) % 16 == 0 {
+                return Some(CIRType::Plain(PlainType::Float128));
+            } else {
+                // misaligned f128 spills to memory
+                return None;
+            }
         }
 
         let source_layout = self.tctx.layout_of(source_type);
         let source_size = source_layout.size - source_offset;
-        let float_size = self.float_size(&float_kind);
+        let float_size = self.tctx.layout_of(&CIRType::Plain(float_type.clone())).size;
 
-        let mut float_type2 = if source_size > float_size {
-            self.get_fp_type_at_offset(ty, offset + float_size)
-        } else {
-            None
+        let mut float_type2 = {
+            if source_size > float_size {
+                self.get_fp_type_at_offset(ty, offset + float_size)
+                    .and_then(|ty| ty.as_plain())
+            } else {
+                None
+            }
         };
 
         if float_type2.is_none() {
-            if float_kind == ABIFloatKind::F16 && source_size > 4 {
-                float_type2 = self.get_fp_type_at_offset(ty, offset + 4);
+            if float_type == PlainType::Float16 && source_size > 4 {
+                float_type2 = self.get_fp_type_at_offset(ty, offset + 4).and_then(|ty| ty.as_plain());
             }
 
             if float_type2.is_none() {
-                return Some(ABIType::Float(float_kind));
+                return Some(CIRType::Plain(float_type));
             }
         }
 
-        let float_kind2 = match float_type2.unwrap() {
-            ABIType::Float(kind) => kind,
-            _ => return Some(ABIType::Float(ABIFloatKind::F64)),
+        let Some(float_type2) = float_type2 else {
+            return Some(CIRType::Plain(PlainType::Float64));
         };
 
-        if float_kind == ABIFloatKind::F32 && float_kind2 == ABIFloatKind::F32 {
-            return Some(ABIType::Vector {
-                element_ty: Box::new(ABIType::Float(ABIFloatKind::F32)),
+        if float_type == PlainType::Float32 && float_type2 == PlainType::Float32 {
+            return Some(CIRType::Vector(CIRVectorType {
+                element_type: Box::new(CIRType::Plain(PlainType::Float32)),
                 lanes: 2,
-            });
+            }));
         }
 
-        if float_kind == ABIFloatKind::F16 && float_kind2 == ABIFloatKind::F16 {
+        if float_type == PlainType::Float16 && float_type2 == PlainType::Float16 {
             let has_following_float = source_size > 4 && self.get_fp_type_at_offset(ty, offset + 4).is_some();
 
-            return Some(ABIType::Vector {
-                element_ty: Box::new(ABIType::Float(ABIFloatKind::F16)),
+            return Some(CIRType::Vector(CIRVectorType {
+                element_type: Box::new(CIRType::Plain(PlainType::Float16)),
                 lanes: if has_following_float { 4 } else { 2 },
-            });
+            }));
         }
 
-        if float_kind == ABIFloatKind::F16 || float_kind2 == ABIFloatKind::F16 {
-            return Some(ABIType::Vector {
-                element_ty: Box::new(ABIType::Float(ABIFloatKind::F16)),
+        if float_type == PlainType::Float16 || float_type2 == PlainType::Float16 {
+            return Some(CIRType::Vector(CIRVectorType {
+                element_type: Box::new(CIRType::Plain(PlainType::Float16)),
                 lanes: 4,
-            });
+            }));
         }
 
-        Some(ABIType::Float(ABIFloatKind::F64))
+        Some(CIRType::Plain(PlainType::Float64))
     }
 
     // https://github.com/llvm/llvm-project/blob/a08cc6e0d5e3fa653649a7826f1ffafc2b3ea2dd/clang/lib/CodeGen/Targets/X86.cpp#L2321
@@ -420,16 +431,7 @@ impl X86_64 {
         }
     }
 
-    fn float_size(&self, float_kind: &ABIFloatKind) -> u32 {
-        match float_kind {
-            ABIFloatKind::F16 => 2,
-            ABIFloatKind::F32 => 4,
-            ABIFloatKind::F64 => 8,
-            ABIFloatKind::F128 => 16,
-        }
-    }
-
-    fn param_types_from_arg_info(&self, abi_arg: &ABIArgInfo, param_type: &CIRType) -> Vec<ABIType> {
+    fn param_types_from_arg_info(&self, abi_arg: &ABIArgInfo, param_type: &CIRType) -> Vec<CIRType> {
         let mut types = Vec::new();
 
         match &abi_arg.kind {
@@ -437,7 +439,7 @@ impl X86_64 {
                 if let Some(ty) = coerce_to {
                     types.push(ty.clone());
                 } else {
-                    types.push(cir_type_to_abi_type(self.tctx.clone(), param_type));
+                    types.push(param_type.clone());
                 }
             }
             ABIArgKind::DirectCoerce { ty } => {
@@ -451,7 +453,7 @@ impl X86_64 {
                 types.push(ty.clone());
             }
             ABIArgKind::Extend { .. } => {
-                types.push(cir_type_to_abi_type(self.tctx.clone(), param_type));
+                types.push(param_type.clone());
             }
             ABIArgKind::Expand { kind } => match kind {
                 ExpandKind::Struct { .. } => {
@@ -459,10 +461,10 @@ impl X86_64 {
                     let fields = param_type.struct_or_union_fields(&self.tctx).unwrap();
 
                     for field in fields {
-                        types.push(cir_type_to_abi_type(self.tctx.clone(), &field));
+                        types.push(field.clone());
                     }
                 }
-                _ => return vec![cir_type_to_abi_type(self.tctx.clone(), param_type)],
+                _ => return vec![param_type.clone()],
             },
             ABIArgKind::Ignore => {
                 // skip
@@ -479,37 +481,36 @@ impl X86_64 {
         let mut params_types = Vec::new();
         let mut params_infos = Vec::new();
 
-        for param_ty in &cir_func_type.params {
-            let abi_param_type = cir_type_to_abi_type(self.tctx.clone(), param_ty);
-
-            params_types.push(abi_param_type);
+        for param_type in &cir_func_type.params {
+            params_types.push(param_type.clone());
             params_infos.push(ABIArgInfo::direct());
         }
 
-        let ret_abi_type = cir_type_to_abi_type(self.tctx.clone(), &cir_func_type.ret_type);
+        // Actual return type might differ from ABIType
+        let abi_type = &*cir_func_type.ret_type;
 
         let ret_info = if cir_func_type.ret_type.is_void() {
             ABIRetInfo {
-                abi_type: ret_abi_type,
+                abi_type: abi_type.clone(),
                 kind: ABIRetInfoKind::Ignore,
-                cir_ret_type: cir_func_type.ret_type.clone(),
+                ret_type: cir_func_type.ret_type.clone(),
             }
         } else {
             ABIRetInfo {
-                abi_type: ret_abi_type,
+                abi_type: abi_type.clone(),
                 kind: ABIRetInfoKind::Direct { coerce_to: None },
-                cir_ret_type: cir_func_type.ret_type.clone(),
+                ret_type: cir_func_type.ret_type.clone(),
             }
         };
 
         ABIFunctionInfo {
             params_infos,
             params_types,
-            ret_info,
+            ret_info: Box::new(ret_info),
         }
     }
 
-    fn classify_func_sysv(&self, fn_ty: &CIRFuncType) -> ABIFunctionInfo {
+    fn classify_func_sysv(&self, func_type: &CIRFuncType) -> ABIFunctionInfo {
         let mut available_regs = Registers {
             int_regs: 6,
             sse_regs: 8,
@@ -518,14 +519,14 @@ impl X86_64 {
         let mut params_types = Vec::new();
         let mut params_infos = Vec::new();
 
-        let ret_info = self.classify_return(&fn_ty.ret_type);
+        let ret_info = self.classify_return(&func_type.ret_type);
 
         // sret consumes one integer register in sysv
         if ret_info.kind.is_indirect() {
             available_regs.int_regs -= 1;
         }
 
-        for param_type in &fn_ty.params {
+        for param_type in &func_type.params {
             let abi_arg = self.classify_parameter(param_type, &mut available_regs, true);
 
             // index before expansion
@@ -543,7 +544,7 @@ impl X86_64 {
         ABIFunctionInfo {
             params_infos,
             params_types,
-            ret_info,
+            ret_info: Box::new(ret_info),
         }
     }
 }
@@ -585,11 +586,12 @@ impl TargetABI for X86_64 {
                 needed_regs.int_regs += 1;
 
                 if ty.is_integer_or_bool() {
-                    result_type = Some(cir_type_to_abi_type(self.tctx.clone(), ty));
+                    result_type = Some(ty.clone());
                 } else if let Some(enum_type) = ty.as_enum(&self.tctx) {
                     if enum_type.is_scalar_optimizable() {
                         let tag_type = enum_type.tag_type_or_infer_or_default();
-                        result_type = Some(cir_type_to_abi_type(self.tctx.clone(), &tag_type));
+
+                        result_type = Some(*tag_type.clone());
                     }
                 } else {
                     result_type = Some(self.get_int_type_at_offset(ty, 0, ty, 0));
@@ -649,14 +651,21 @@ impl TargetABI for X86_64 {
 
                 let sse_ty = self
                     .get_sse_type_at_offset(ty, 8, ty, 8)
-                    .unwrap_or(ABIType::Float(ABIFloatKind::F64)); // fallback
+                    .unwrap_or(CIRType::Plain(PlainType::Float64)); // fallback
 
                 high_part = Some(sse_ty);
 
                 assert!(lo_class != RegisterClass::NoClass, "empty first 8 bytes not allowed");
             }
             RegisterClass::SSEUP => {
-                unreachable!() // NOTE: Vector type not supported already.
+                assert!(lo_class == RegisterClass::SSE);
+
+                needed_regs.sse_regs += 1;
+
+                return (
+                    ABIArgInfo::direct_coerce(CIRType::Plain(PlainType::Float128)),
+                    needed_regs,
+                );
             }
         }
 
@@ -665,16 +674,14 @@ impl TargetABI for X86_64 {
         }
 
         if let Some(result) = &result_type {
-            let abi_type = cir_type_to_abi_type(self.tctx.clone(), ty);
-
             // if abi type already matches, pass directly
-            if *result == abi_type {
+            if result == ty {
                 return (ABIArgInfo::direct(), needed_regs);
             }
 
             // only allow integer-width coercion for scalar integer/bool types
             if ty.is_integer_or_bool() {
-                if result.as_integer_bits(&self.info) == abi_type.as_integer_bits(&self.info) {
+                if self.tctx.get_integer_bit_width(result) == self.tctx.get_integer_bit_width(ty) {
                     return (ABIArgInfo::direct(), needed_regs);
                 }
             }
@@ -784,15 +791,19 @@ impl TargetABI for X86_64 {
 
             CIRType::Array(array_type) => CIRType::Pointer(array_type.element_type.clone()),
 
+            CIRType::Vector(_) => {
+                unimplemented!("not supported in language yet");
+            }
+
             CIRType::Pointer(_) | CIRType::FuncType(_) => ty.clone(),
             CIRType::Struct(_) | CIRType::Dynamic(_) | CIRType::Enum(_) | CIRType::Union(_) => ty.clone(),
         }
     }
 
-    fn classify_return(&self, cir_ret_type: &CIRType) -> ABIRetInfo {
+    fn classify_return(&self, abi_ret_type: &CIRType) -> ABIRetInfo {
         let mut lo_class = RegisterClass::NoClass;
         let mut hi_class = RegisterClass::NoClass;
-        classify(&self.info, &self.tctx, cir_ret_type, 0, &mut lo_class, &mut hi_class);
+        classify(&self.info, &self.tctx, abi_ret_type, 0, &mut lo_class, &mut hi_class);
 
         assert!(
             hi_class != RegisterClass::Memory || lo_class == RegisterClass::Memory,
@@ -809,9 +820,9 @@ impl TargetABI for X86_64 {
             RegisterClass::NoClass => {
                 if hi_class == RegisterClass::NoClass {
                     return ABIRetInfo {
-                        abi_type: cir_type_to_abi_type(self.tctx.clone(), cir_ret_type),
                         kind: ABIRetInfoKind::Ignore,
-                        cir_ret_type: Box::new(cir_ret_type.clone()),
+                        abi_type: abi_ret_type.clone(),
+                        ret_type: Box::new(abi_ret_type.clone()),
                     };
                 }
 
@@ -823,24 +834,36 @@ impl TargetABI for X86_64 {
             RegisterClass::SSEUP => unreachable!(),
             RegisterClass::Memory => {
                 return ABIRetInfo {
-                    abi_type: cir_type_to_abi_type(self.tctx.clone(), cir_ret_type),
                     kind: ABIRetInfoKind::Indirect { sret: true },
-                    cir_ret_type: Box::new(cir_ret_type.clone()),
+                    abi_type: abi_ret_type.clone(),
+                    ret_type: Box::new(abi_ret_type.clone()),
                 };
             }
             RegisterClass::Integer => {
-                result_type = Some(self.get_int_type_at_offset(cir_ret_type, 0, cir_ret_type, 0));
+                result_type = Some(self.get_int_type_at_offset(abi_ret_type, 0, abi_ret_type, 0));
 
-                if hi_class == RegisterClass::NoClass && cir_ret_type.is_integer_or_bool() {
+                if hi_class == RegisterClass::NoClass && abi_ret_type.is_integer_or_bool() {
                     return ABIRetInfo {
                         abi_type: result_type.clone().unwrap(),
                         kind: ABIRetInfoKind::Direct { coerce_to: result_type },
-                        cir_ret_type: Box::new(cir_ret_type.clone()),
+                        ret_type: Box::new(abi_ret_type.clone()),
                     };
                 }
             }
             RegisterClass::SSE => {
-                result_type = Some(self.get_sse_type_at_offset(cir_ret_type, 0, cir_ret_type, 0).unwrap());
+                // check if this is f128 (hi_class == SSEUP)
+                if hi_class == RegisterClass::SSEUP {
+                    // f128 returns in a single SSE register pair
+                    let ty = CIRType::Plain(PlainType::Float128);
+
+                    return ABIRetInfo {
+                        abi_type: ty.clone(),
+                        kind: ABIRetInfoKind::Direct { coerce_to: Some(ty) },
+                        ret_type: Box::new(abi_ret_type.clone()),
+                    };
+                }
+
+                result_type = Some(self.get_sse_type_at_offset(abi_ret_type, 0, abi_ret_type, 0).unwrap());
             }
         }
 
@@ -850,35 +873,45 @@ impl TargetABI for X86_64 {
             RegisterClass::Memory | RegisterClass::NoClass => {}
             RegisterClass::Integer => {
                 assert!(lo_class != RegisterClass::NoClass, "empty first 8 bytes not allowed");
-                high_part = Some(self.get_int_type_at_offset(cir_ret_type, 8, cir_ret_type, 8));
+                high_part = Some(self.get_int_type_at_offset(abi_ret_type, 8, abi_ret_type, 8));
             }
             RegisterClass::SSE => {
                 assert!(lo_class != RegisterClass::NoClass, "empty first 8 bytes not allowed");
-                high_part = Some(self.get_sse_type_at_offset(cir_ret_type, 8, cir_ret_type, 8).unwrap());
+                high_part = Some(self.get_sse_type_at_offset(abi_ret_type, 8, abi_ret_type, 8).unwrap());
             }
             RegisterClass::SSEUP => {
-                unreachable!() // NOTE: Vector type not supported already.
+                unreachable!()
             }
         }
 
         // if a high part was specified, return as direct pair
         if let (Some(lo), Some(hi)) = (&result_type, high_part) {
+            let loc = Loc::default(FileID(0)); // dummy;
+
             // combine lo and hi into a struct type for direct pair return
+            let abi_type = CIRType::Struct(self.tctx.insert_struct(CIRStructType {
+                decl_key: None,
+                name: None,
+                fields: vec![lo.clone(), hi.clone()],
+                fields_info: vec![("lo".to_string(), loc), ("hi".to_string(), loc)],
+                repr_attr: None,
+                align: None,
+                loc,
+            }));
+
             return ABIRetInfo {
-                abi_type: ABIType::Struct(vec![lo.clone(), hi.clone()], false),
+                abi_type,
                 kind: ABIRetInfoKind::DirectPair { lo: lo.clone(), hi },
-                cir_ret_type: Box::new(cir_ret_type.clone()),
+                ret_type: Box::new(abi_ret_type.clone()),
             };
         }
 
         if let Some(result) = result_type {
-            let abi_type = cir_type_to_abi_type(self.tctx.clone(), cir_ret_type);
-
-            if result == abi_type {
+            if result == *abi_ret_type {
                 return ABIRetInfo {
                     abi_type: result,
                     kind: ABIRetInfoKind::Direct { coerce_to: None },
-                    cir_ret_type: Box::new(cir_ret_type.clone()),
+                    ret_type: Box::new(abi_ret_type.clone()),
                 };
             }
 
@@ -887,16 +920,15 @@ impl TargetABI for X86_64 {
                 kind: ABIRetInfoKind::Direct {
                     coerce_to: Some(result),
                 },
-                cir_ret_type: Box::new(cir_ret_type.clone()),
+                ret_type: Box::new(abi_ret_type.clone()),
             };
         }
 
         // fallback
-        let abi_type = cir_type_to_abi_type(self.tctx.clone(), cir_ret_type);
         ABIRetInfo {
-            abi_type,
+            abi_type: abi_ret_type.clone(),
             kind: ABIRetInfoKind::Direct { coerce_to: None },
-            cir_ret_type: Box::new(cir_ret_type.clone()),
+            ret_type: Box::new(abi_ret_type.clone()),
         }
     }
 
@@ -927,11 +959,19 @@ fn classify(
         CIRType::Enum(_) => classify_enum(info, tctx, ty, offset_base, lo_class, hi_class),
 
         CIRType::Plain(plain_type) => classify_plain_type(plain_type, offset_base, lo_class, hi_class),
+
         CIRType::Const(inner) => classify(info, tctx, inner, offset_base, lo_class, hi_class),
+
         CIRType::Pointer(_) | CIRType::FuncType(_) => {
             unsafe { *current = RegisterClass::Integer };
         }
+
         CIRType::Array(array_type) => classify_array(info, tctx, array_type, offset_base, lo_class, hi_class),
+
+        CIRType::Vector(_) => {
+            unimplemented!("not supported in language yet");
+        }
+
         CIRType::Dynamic(_) => classify_dynamic(info, tctx, offset_base, lo_class, hi_class),
     }
 }
@@ -1236,8 +1276,21 @@ fn classify_plain_type(
         }
 
         PlainType::Float128 => {
-            unsafe { *lo_class = RegisterClass::SSE };
-            unsafe { *hi_class = RegisterClass::SSEUP };
+            // f128 is split into two 8-byte halves:
+            // - low 8 bytes -> SSE,
+            // - high 8 bytes -> SSEUP
+            // both in the same XMM register
+            if offset_base < 8 {
+                unsafe { *lo_class = RegisterClass::SSE };
+
+                // set hi_class since it's part of the same 16-byte type
+                if offset_base == 0 {
+                    unsafe { *hi_class = RegisterClass::SSEUP };
+                }
+            } else {
+                // if we're in the high half
+                unsafe { *lo_class = RegisterClass::SSEUP };
+            }
         }
 
         PlainType::Void => {
@@ -1289,13 +1342,26 @@ fn classify_post_merge(size: u32, lo_class: *mut RegisterClass, hi_class: *mut R
         return;
     }
 
-    // if hi is SSEUP but lo isn't SSE or SSEUP, convert hi to SSE
+    // for f128 (size == 16): lo should be SSE, hi should be SSEUP
+    // if hi is SSEUP but lo isn't SSE,
+    // something is wrong -> (default to memory)
     if unsafe { *hi_class } == RegisterClass::SSEUP
         && unsafe { *lo_class } != RegisterClass::SSE
         && unsafe { *lo_class } != RegisterClass::SSEUP
     {
-        unsafe { *hi_class = RegisterClass::SSE };
+        // this shouldn't happen for valid f128, but handle gracefully
+        unsafe { *lo_class = RegisterClass::Memory };
+        unsafe { *hi_class = RegisterClass::Memory };
+        return;
     }
+
+    // if hi is SSEUP but lo is also SSEUP (unlikely),
+    // treat as memory
+    if unsafe { *hi_class } == RegisterClass::SSEUP && unsafe { *lo_class } == RegisterClass::SSEUP {
+        unsafe { *lo_class = RegisterClass::Memory };
+    }
+
+    // if lo is SSE and hi is SSEUP, that represents f128
 }
 
 fn try_use_registers(available_regs: &mut Registers, used: &Registers) -> bool {

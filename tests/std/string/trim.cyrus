@@ -1,6 +1,6 @@
 // @stdout: Hello World, 11
 
-import std::mem::alloc::libc{LibcAllocator};
+import std::mem::libc{LibcAllocator};
 import std::mem{Allocator};
 import std::string{String};
 import std::libc{printf};
@@ -15,7 +15,7 @@ pub fn main() {
 
     const str = name.as_str_const();
 
-    for (var i: usize = 0; i < name.len(); i++) {
+    for (var i: usize = 0; i < name.len(); i += 1) {
         printf("%c", str[i]);
     }
 

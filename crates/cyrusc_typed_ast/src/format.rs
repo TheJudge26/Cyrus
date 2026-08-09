@@ -12,7 +12,6 @@ use crate::{
     stmts::{TypedFuncParamKind, TypedFuncTypeVariadicParam, TypedFuncVariadicParam, TypedTypeArgs},
     types::{SemaType, TypedArrayCapacity, TypedFuncType, UnresolvedType},
 };
-use cyrusc_ast::operators::UnaryOperator;
 use cyrusc_source_loc::{Loc, SourceMap};
 
 /// Provides human‑readable formatting utilities for compiler diagnostics
@@ -135,15 +134,6 @@ pub fn format_typed_expr(expr: &TypedExpr, formatter: &dyn Formatter) -> String 
             inf.op,
             format_typed_expr(&inf.rhs, formatter)
         ),
-        Unary(unary) => {
-            let operand = format_typed_expr(&unary.operand, formatter);
-            match unary.op {
-                UnaryOperator::PreIncrement => format!("++{}", operand),
-                UnaryOperator::PreDecrement => format!("--{}", operand),
-                UnaryOperator::PostIncrement => format!("{}++", operand),
-                UnaryOperator::PostDecrement => format!("{}--", operand),
-            }
-        }
         Assign(assign) => {
             let lhs = format_typed_expr(&assign.lhs, formatter);
             let rhs = format_typed_expr(&assign.rhs, formatter);
@@ -393,11 +383,11 @@ pub fn format_sema_type(ty: SemaType, formatter: &dyn Formatter) -> String {
             format!("{}{}", name, format_type_args(&named_type.type_args, formatter))
         }
         SemaType::Plain(plain_type) => plain_type.to_string(),
-        SemaType::Array(typed_array_type) => {
+        SemaType::Array(array_type) => {
             let mut fmt = String::new();
-            fmt.push_str(&format_sema_type(*typed_array_type.element_type, formatter));
+            fmt.push_str(&format_sema_type(*array_type.element_type, formatter));
             fmt.push_str("[");
-            match typed_array_type.capacity {
+            match array_type.capacity {
                 TypedArrayCapacity::Fixed(expr) => {
                     fmt.push_str(&format_typed_expr(&expr, formatter));
                 }
@@ -406,11 +396,11 @@ pub fn format_sema_type(ty: SemaType, formatter: &dyn Formatter) -> String {
             fmt.push_str("]");
             fmt
         }
-        SemaType::Const(sema_type) => {
-            format!("const {}", format_sema_type(*sema_type, formatter))
+        SemaType::Const(ty) => {
+            format!("const {}", format_sema_type(*ty, formatter))
         }
-        SemaType::Pointer(sema_type) => {
-            format!("{}*", format_sema_type(*sema_type, formatter))
+        SemaType::Pointer(inner) => {
+            format!("{}*", format_sema_type(*inner, formatter))
         }
         SemaType::FuncType(func_type) => format_func_type(&func_type, formatter),
         SemaType::Tuple(tuple_type) => {

@@ -1,35 +1,93 @@
-import std::mem::alloc::libc{LibcAllocator};
-import utils::file{read_file_content};
-import std::io{Writer, StringWriter};
-import diags{compile_error};
+import std::mem::libc{LibcAllocator};
+import std::io{Writer, StderrWriter};
 import std::mem{Allocator};
 import std::string{String};
-import parse::lex{Lexer};
 import std::libc{printf};
 
-import parse::lex::tokens{
-    Token,
-    dump_tokens,
-};
+import (
+    diags::render{CompilerDiagRender},
+    diags{
+        DiagContext,
+        Diag,
+        SubDiag,
+    },
+    source{SourceContext, Source},
+    tokens{Loc}
+);
 
-pub fn main(argc: int32, argv: uint8**) {
+import std::path{Path};
+
+
+pub fn main() {
     var allocator: Allocator = dynamic LibcAllocator.new();
 
-    const file_name = argv[1];
-    if (!file_name) {
-        compile_error("no input files");
-    }
-
-    var source = read_file_content(file_name);
-    defer source.free();
-
-    var lexer = Lexer.new(allocator, &source);
+    // --------
+    // TODO SourceContext 
+    const path = Path.new(allocator, "/home/tahad/Code/Cyrus/Cyrus/tmp/foo.cyrus");
     
-    const token_pool = lexer.tokenize();
-    defer token_pool.free();
+    switch (Source.open(allocator, 1, path)) {
+        case .Value(source) => {
+            defer source.free();
 
-    const tokens = token_pool.inner();
+            // const slice = source.get_line(2).unwrap();
+            const slice = source.get_lines(1, 2).unwrap();
 
-    printf("Tokens Count: %lu\n", tokens.len());
-    dump_tokens(&tokens);
+            for (var i: usize = 0; i < slice.len(); i += 1) {
+                printf("%c", slice.get(i).unwrap());
+            }
+            printf("\n");
+        }
+        case .Error(_) => @panic("constructing source failed");
+    }
+    // --------
+
+    // var dctx = DiagContext.new(allocator);
+    // defer dctx.free();
+    
+    // {
+    //     const loc = Loc { start_line: 1, start_col: 1, end_line: 1, end_col: 1, start: 1, end: 1 };
+    //     const mesg = String.from_str(allocator, "Meow :3");
+    //     const under = String.from_str(allocator, "under mesg");
+    //     var diag = Diag.new(allocator, mesg, .Some(under), loc);
+        
+    //     dctx.report(diag);
+    // }
+
+    // var writer: Writer = dynamic StderrWriter.new();
+
+    // const dctxr = CompilerDiagRender.new(dctx, writer);
+    // dctxr.render();
 }
+
+// import std::mem::libc{LibcAllocator};
+// import std::io{Writer, StringWriter};
+// import utils::fs{read_file_to_string_or_exit};
+// import diags{exit_with_compile_error};
+// import std::mem{Allocator};
+// import std::string{String};
+// import parse::lex{Lexer};
+// import std::libc{printf};
+
+// import tokens{Token, dump_tokens};
+
+// pub fn main(argc: int32, argv: uint8**) {
+//     var allocator: Allocator = dynamic LibcAllocator.new();
+
+//     const file_name = argv[1];
+//     if (!file_name) {
+//         exit_with_compile_error("no input files");
+//     }
+
+//     var source = read_file_to_string_or_exit(file_name);
+//     defer source.free();
+
+//     var lexer = Lexer.new(allocator, &source);
+    
+//     const token_pool = lexer.tokenize();
+//     defer token_pool.free();
+
+//     const tokens = token_pool.inner();
+
+//     printf("Tokens Count: %lu\n", tokens.len());
+//     dump_tokens(&tokens);
+// }

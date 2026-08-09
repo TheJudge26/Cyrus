@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 The Cyrus Language
 
-use cyrusc_ast::operators::UnaryOperator;
 use cyrusc_diagcentral::exit_with_msg;
 use cyrusc_internal::cir::{
     cir::*,
@@ -428,20 +427,6 @@ impl<'a> CIRPrinter<'a> {
 
             CIRExprKind::SizeOf(sizeof) => format!("sizeof({})", self.print_type(&sizeof.ty)),
 
-            CIRExprKind::Unary(unary) => {
-                let op = unary.op.to_string();
-                let rhs = self.print_expr(&unary.operand);
-
-                match unary.op {
-                    UnaryOperator::PreIncrement | UnaryOperator::PreDecrement => {
-                        format!("({op}{rhs})")
-                    }
-                    UnaryOperator::PostIncrement | UnaryOperator::PostDecrement => {
-                        format!("({rhs}{op})")
-                    }
-                }
-            }
-
             CIRExprKind::Array(array) => {
                 let elements = array
                     .elements
@@ -733,6 +718,10 @@ impl<'a> CIRPrinter<'a> {
 
             CIRType::Dynamic(dynamic) => {
                 format!("dynamic(vtable#{})", dynamic.vtable_id.0)
+            }
+
+            CIRType::Vector(_) => {
+                unimplemented!("not supported in language yet");
             }
         }
     }
