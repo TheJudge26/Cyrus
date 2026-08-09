@@ -271,11 +271,6 @@ pub struct CIRPrefixExpr {
     pub operand: Box<CIRExpr>,
 }
 
-#[derive(Debug, Clone)]
-pub struct CIRUnaryExpr {
-    pub op: UnaryOperator,
-    pub operand: Box<CIRExpr>,
-}
 
 #[derive(Debug, Clone)]
 pub struct CIRAsmOperand {

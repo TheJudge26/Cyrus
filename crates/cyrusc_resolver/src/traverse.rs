@@ -252,7 +252,7 @@ impl<'a> Resolver<'a> {
             ASTStmt::Defer(_) => unreachable!(),
             ASTStmt::InlineAsm(asm) => {
                 let typed_asm = self.resolve_inline_asm(asm);
-                Some(TypedStmt::InlineAsm(typed_asm))
+                Some(TypedStmt::new(TypedStmtKind::InlineAsm(typed_asm)))
             }
         }
     }
