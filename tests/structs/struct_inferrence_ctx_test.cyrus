@@ -6,15 +6,15 @@ struct Record<K, V> {
 	key: K,
 	value: V,
 
-	pub fn new(const key: K, const value: V) Self {
+	pub fn new(key: K, value: V) Self {
 		return Self{key, value};
 	}
 
-	pub inline fn key(&const self) K {
+	pub inline fn key(self: const Self*) K {
 		return self->key;
 	}
 
-	pub inline fn value(&const self) V {
+	pub inline fn value(self: const Self*) V {
 		return self->value;
 	}
 }
@@ -31,7 +31,7 @@ pub fn main() {
 		value: "Cyrus"	
 	};
 
-	for (var i = 0; i < 3; i++) {
+	for (var i = 0; i < 3; i += 1) {
 		const user = users[i];
 
 		printf("%d: %s ", user.key(), user.value());

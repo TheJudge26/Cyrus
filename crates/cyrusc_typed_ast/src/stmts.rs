@@ -12,7 +12,7 @@ use crate::{
     types::SemaType,
 };
 use cyrusc_ast::{
-    Ident, Mutability, SelfModifierKind,
+    Ident, Mutability,
     abi::{ReprKind, Visibility},
     modifiers::{EnumModifiers, FuncModifiers, GlobalVarModifiers, StructModifiers, UnionModifiers},
 };
@@ -20,7 +20,13 @@ use cyrusc_source_loc::{FileID, Loc};
 use std::hash::Hash;
 
 #[derive(Debug, Clone)]
-pub enum TypedStmt {
+pub struct TypedStmt {
+    pub kind: TypedStmtKind,
+    pub is_dead: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum TypedStmtKind {
     Variable(TypedVarStmt),
     Typedef(TypedTypedefStmt),
     GlobalVar(TypedGlobalVarStmt),
@@ -86,7 +92,7 @@ pub enum TypedTupleExportPatternKind {
 
 #[derive(Debug, Clone)]
 pub struct TypedDeferStmt {
-    pub operand: Box<TypedStmt>,
+    pub operand: Box<TypedStmtKind>,
     pub loc: Loc,
 }
 
@@ -311,9 +317,7 @@ pub enum TypedFuncParamKind {
 pub struct TypedSelfModifier {
     // none if used in func decl (no body)
     pub var_decl_id: Option<VarDeclID>,
-
     pub ty: SemaType,
-    pub kind: SelfModifierKind,
     pub mutability: Mutability,
     pub loc: Loc,
 }
@@ -449,6 +453,12 @@ pub struct TypedBound {
     pub loc: Loc,
 }
 
+impl TypedStmt {
+    pub fn new(kind: TypedStmtKind) -> Self {
+        return Self { kind, is_dead: false };
+    }
+}
+
 impl TypedGenericParams {
     #[inline]
     pub fn new() -> Self {
@@ -560,6 +570,13 @@ impl TypedUnionStmt {
     }
 }
 
+impl TypedSelfModifier {
+    #[inline]
+    pub fn is_referenced(&self) -> bool {
+        self.ty.is_pointer()
+    }
+}
+
 impl TypedFuncParams {
     pub fn lookup_param(&self, name: &str) -> Option<&TypedFuncParamKind> {
         self.list.iter().find(|param_kind| param_kind.name().as_str() == name)
@@ -589,7 +606,7 @@ impl TypedFuncParams {
     }
 }
 
-impl TypedStmt {
+impl TypedStmtKind {
     pub fn loc(&self) -> Loc {
         match self {
             TypedStmt::Variable(typed_variable) => typed_variable.loc,
@@ -861,7 +878,7 @@ impl PartialEq for TypedFuncParam {
 
 impl PartialEq for TypedSelfModifier {
     fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
+        self.is_referenced() == other.is_referenced() && self.mutability == other.mutability
     }
 }
 

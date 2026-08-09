@@ -1,5 +1,8 @@
-import std::mem::alloc::libc{LibcAllocator};
-import std::collections{Vector};
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 The Cyrus Language
+
+import std::mem::libc{LibcAllocator};
+import std::collections{Vec};
 import std::io{StringWriter};
 import std::string{String};
 import std::mem{Allocator};
@@ -15,18 +18,14 @@ import std::format{
 };
 
 pub struct TokenPool {
-    tokens: Vector<Token>,
+    tokens: Vec<Token>,
 
-    pub inline fn new(tokens: Vector<Token>) Self {
+    pub inline fn new(tokens: Vec<Token>) Self {
         return Self { tokens };
     }
 
-    pub inline fn inner(const self) Vector<Token> {
-        return self.tokens;
-    }
-
-    pub fn free(self) {
-        for (var i: usize = 0; i < self.tokens.len(); i++) {
+    pub fn free(self: Self) {
+        for (var i: usize = 0; i < self.tokens.len(); i += 1) {
             const token = self.tokens.get(i).unwrap();
 
             switch (token.kind) {
@@ -44,7 +43,7 @@ pub struct Token : Format {
     pub kind: TokenKind,
     pub loc: Loc,
 
-    pub fn format(&const self, writer: Writer) bool {
+    pub fn format(self: const Self*, writer: Writer) bool {
         return self->kind.format(writer);
     }
 }
@@ -181,7 +180,7 @@ pub enum TokenKind : Format {
     EOF,
     INVALID,
 
-    pub inline fn is_eof(&const self) bool {
+    pub inline fn is_eof(self: const Self*) bool {
         switch (*self) {
             case .EOF => return true;
             default => return false;
@@ -241,6 +240,10 @@ pub enum TokenKind : Format {
             case "inline" => return .Some(.Inline);
             case "pub" => return .Some(.Public);
             case "const" => return .Some(.Const);
+            case "goto" => return .Some(.Goto);
+            case "defer" => return .Some(.Defer);
+            case "union" => return .Some(.Union);
+            case "while" => return .Some(.While);
             case "weak" => return .Some(.Weak);
             case "linkonce" => return .Some(.LinkOnce);
             case "callconv" => return .Some(.Callconv);
@@ -256,10 +259,6 @@ pub enum TokenKind : Format {
             case "nounwind" => return .Some(.NoUnwind);
             case "section" => return .Some(.Section);
             case "repr" => return .Some(.Repr);
-            case "goto" => return .Some(.Goto);
-            case "defer" => return .Some(.Defer);
-            case "union" => return .Some(.Union);
-            case "while" => return .Some(.While);
             case "noinline" => return .Some(.NoInline);
             case "alwaysinline" => return .Some(.AlwaysInline);
         }
@@ -267,7 +266,7 @@ pub enum TokenKind : Format {
         return .None;
     }
 
-    pub fn format(&const self, writer: Writer) bool {
+    pub fn format(self: const Self*, writer: Writer) bool {
         switch (*self) {
             case .Ident(ident) => writer.write(ident.as_str_const());
             case .Literal(lit) => lit.format(writer);
@@ -415,7 +414,7 @@ pub enum Literal : Format {
     Bool(bool),
     Null,
 
-    pub fn format(&const self, writer: Writer) bool {
+    pub fn format(self: const Self*, writer: Writer) bool {
         switch (*self) {
             case .Integer { value, suffix } => {
                 switch (value) {
@@ -489,7 +488,7 @@ pub enum IntegerSuffix {
         }
     }
 
-    pub fn to_str(const self) const uint8* {
+    pub fn to_str(self: Self) const uint8* {
         switch (self) {
             case .ISize => return "isize";
             case .USize => return "usize";
@@ -526,7 +525,7 @@ pub enum FloatSuffix {
         }
     }
 
-    pub fn to_str(const self) const uint8* {
+    pub fn to_str(self: Self) const uint8* {
         switch (self) {
             case .Float16 => return "float16";
             case .Float32 => return "float32";
@@ -546,7 +545,7 @@ pub enum StringPrefix {
         }
     }
 
-    pub fn to_str(const self) const uint8* {
+    pub fn to_str(self: Self) const uint8* {
         switch (self) {
             case .Byte => return "b";
         }
@@ -555,41 +554,92 @@ pub enum StringPrefix {
 
 /// Represents precise location tracking within a source file.
 pub struct Loc {
-    // TODO: Enable file_id once multi-source support implemented.
-    // file_id: FileId,
-    pub line: usize,
-    pub col: usize,
+    // TODO
+    // source_id: SourceId,
+
+    // Line/Column (1-indexed).
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+
+    // Withing soruce byte offset (0-indexed).
+    pub start: usize,
+    pub end: usize,
+
+    pub fn merge(self: const Self*, other: const Self*) Self {
+        var merge: Self;
+        
+        // Start line
+        if (self->start_line < other->start_line) {
+            merge.start_line = self->start_line;
+        } else {
+            merge.start_line = other->start_line;
+        }
+        
+        // Start column
+        if (self->start_line < other->start_line) {
+            merge.start_col = self->start_col;
+        } else if (other->start_line < self->start_line) {
+            merge.start_col = other->start_col;
+        } else {
+            if (self->start_col < other->start_col) {
+                merge.start_col = self->start_col;
+            } else {
+                merge.start_col = other->start_col;
+            }
+        }
+        
+        // End line
+        if (self->end_line > other->end_line) {
+            merge.end_line = self->end_line;
+        } else {
+            merge.end_line = other->end_line;
+        }
+        
+        // End column
+        if (self->end_line > other->end_line) {
+            merge.end_col = self->end_col;
+        } else if (other->end_line > self->end_line) {
+            merge.end_col = other->end_col;
+        } else {
+            if (self->end_col > other->end_col) {
+                merge.end_col = self->end_col;
+            } else {
+                merge.end_col = other->end_col;
+            }
+        }
+        
+        // Byte offsets
+        if (self->start < other->start) {
+            merge.start = self->start;
+        } else {
+            merge.start = other->start;
+        }
+        
+        if (self->end > other->end) {
+            merge.end = self->end;
+        } else {
+            merge.end = other->end;
+        }
+        
+        return merge;
+    }
 }
 
 /// Formats and writes a collection of tokens to stdout.
 /// This is primarily used for debugging and emitting lexer result.
-pub fn dump_tokens(tokens: const Vector<Token>*) {
-    var allocator: Allocator = dynamic LibcAllocator.new();
-
-    var fmt = String.new(allocator);
-    defer fmt.free();  
-
-    var writer: Writer = dynamic StringWriter.new(&fmt);
-
-    for (var i: usize = 0; i < tokens->len(); i++) {
+pub fn dump_tokens(tokens: const Vec<Token>*) {
+    for (var i: usize = 0; i < tokens->len(); i += 1) {
         const token = tokens->get(i).unwrap();
         
-        token.format(writer);
-        
-        printf(
-            "Token `%s`, Line: %lu, Column: %lu\n",
-            fmt.as_str_const(),
-            token.loc.line,
-            token.loc.col
-        );
-
-        fmt.clear();
+        dump_token(token);
     }
 }
 
 /// Formats and writes a tokens to stdout.
 /// This is primarily used for debugging and emitting lexer result.
-pub fn dump_token(const token: Token) {
+pub fn dump_token(token: Token) {
     var allocator: Allocator = dynamic LibcAllocator.new();
 
     var fmt = String.new(allocator);
@@ -600,9 +650,11 @@ pub fn dump_token(const token: Token) {
     token.format(writer);
         
     printf(
-        "Token `%s`, Line: %lu, Column: %lu\n",
+        "Token `%s`, Start Line: %lu, Start Column: %lu, End Line: %lu, End Column: %lu\n",
         fmt.as_str_const(),
-        token.loc.line,
-        token.loc.col
+        token.loc.start_line,
+        token.loc.start_col,
+        token.loc.end_line,
+        token.loc.end_col
     );
 }

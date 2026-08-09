@@ -79,6 +79,8 @@ impl<'a> AnalysisContext<'a> {
 
         if let Some(default) = &mut switch_stmt.default_case {
             flow_states.push(self.analyze_block_stmt(default));
+
+            switch_stmt.all_cases_covered = Some(true);
         } else {
             flow_states.push(FlowState::Reachable);
         }
@@ -165,6 +167,7 @@ impl<'a> AnalysisContext<'a> {
 
                     pattern_range_table.push((lower.try_into().unwrap(), upper.try_into().unwrap()));
                 }
+
                 TypedSwitchCasePatternKind::Expr(expr) => {
                     let Some(expr_type) = this.analyze_expr(expr, Some(operand_type.clone())) else {
                         return None;
@@ -231,6 +234,8 @@ impl<'a> AnalysisContext<'a> {
             let flow_state = self.analyze_block_stmt(default);
 
             flow_states.push(flow_state);
+
+            switch_stmt.all_cases_covered = Some(true);
         } else {
             // check that all enum variants are covered inside switch patterns:
             if all_covered_variants.len() == all_variants_count {

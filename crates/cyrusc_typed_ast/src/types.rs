@@ -672,7 +672,7 @@ impl SemaType {
                     }
                     false
                 }
-                SemaType::Const(inner_ty) | SemaType::Pointer(inner_ty) => inner(inner_ty),
+                SemaType::Const(inner_type) | SemaType::Pointer(inner_type) => inner(inner_type),
                 SemaType::Array(array) => inner(&array.element_type),
                 SemaType::FuncType(func_ty) => {
                     for ty in &func_ty.params.list {
@@ -706,6 +706,18 @@ impl SemaType {
 }
 
 impl PlainType {
+    #[inline]
+    pub fn map_integer_size_to_type(size: usize) -> Option<Self> {
+        Some(match size {
+            1 => PlainType::Int8,
+            2 => PlainType::Int16,
+            4 => PlainType::Int32,
+            8 => PlainType::Int64,
+            16 => PlainType::Int128,
+            _ => return None,
+        })
+    }
+
     #[inline]
     pub fn is_scalar(&self) -> bool {
         match self {

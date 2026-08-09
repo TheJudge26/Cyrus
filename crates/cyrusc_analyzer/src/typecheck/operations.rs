@@ -75,12 +75,10 @@ impl<'a> AnalysisContext<'a> {
     pub(crate) fn analyze_addr_of(&mut self, addr_of: &mut TypedAddrOfExpr) -> Option<SemaType> {
         let expected_type = addr_of.operand.ty.clone();
 
-        let operand_type = match self.analyze_expr(&mut addr_of.operand, expected_type) {
+        let mut operand_type = match self.analyze_expr(&mut addr_of.operand, expected_type) {
             Some(ty) => ty.const_inner().clone(),
             None => return None,
         };
-
-        let is_operand_const = self.is_const_qualified_lvalue(&addr_of.operand);
 
         if !addr_of.operand.is_lvalue() {
             self.reporter.report(Diag {
@@ -92,8 +90,13 @@ impl<'a> AnalysisContext<'a> {
             return None;
         }
 
+        let is_operand_const = addr_of.operand.val_cat.is_const_lvalue();
+
         if is_operand_const {
-            Some(SemaType::Pointer(Box::new(operand_type.as_const())))
+            let inner = operand_type.pointer_inner_mut();
+            *inner = inner.as_const();
+
+            Some(SemaType::Pointer(Box::new(operand_type)))
         } else {
             Some(SemaType::Pointer(Box::new(operand_type)))
         }
@@ -257,50 +260,6 @@ impl<'a> AnalysisContext<'a> {
         }
     }
 
-    pub(crate) fn analyze_unary(&mut self, unary: &mut TypedUnaryExpr) -> Option<SemaType> {
-        let expected_type = unary.operand.ty.clone();
-
-        let mut operand_type = self.analyze_expr(&mut unary.operand, expected_type)?;
-
-        if self.is_const_qualified_lvalue(&unary.operand) {
-            self.reporter.report(Diag {
-                level: DiagLevel::Error,
-                kind: Box::new(AnalyzerDiagKind::CannotAssignToConstLValue),
-                loc: Some(unary.loc),
-                hint: None,
-            });
-            return None;
-        }
-
-        if !unary.operand.is_lvalue() {
-            self.reporter.report(Diag {
-                level: DiagLevel::Error,
-                kind: Box::new(AnalyzerDiagKind::UnaryOnTemporary {
-                    operand_type: format_sema_type(operand_type.clone(), self.formatter),
-                }),
-                loc: Some(unary.loc),
-                hint: None,
-            });
-        }
-
-        // expand operand type
-        operand_type = self.expand_sema_type(operand_type, unary.loc);
-
-        if !((operand_type.is_integer()) || operand_type.is_pointer()) {
-            self.reporter.report(Diag {
-                level: DiagLevel::Error,
-                kind: Box::new(AnalyzerDiagKind::InvalidUnary {
-                    operand_type: format_sema_type(operand_type, self.formatter),
-                }),
-                loc: Some(unary.loc),
-                hint: None,
-            });
-            return None;
-        }
-
-        Some(operand_type)
-    }
-
     fn analyze_pointer_arithmetic_type(
         &mut self,
         lhs_type: &SemaType,
@@ -426,9 +385,7 @@ impl<'a> AnalysisContext<'a> {
 
     fn analyze_or_expr(&mut self, lhs_type: SemaType, rhs_type: SemaType, loc: Loc) -> Option<SemaType> {
         self.analyze_binary_expr(lhs_type, rhs_type, loc, |_, lhs, rhs| match (lhs, rhs) {
-            (SemaType::Plain(lhs_basic), SemaType::Plain(rhs_basic))
-                if lhs_basic.is_bool() && rhs_basic.is_bool() =>
-            {
+            (SemaType::Plain(lhs_basic), SemaType::Plain(rhs_basic)) if lhs_basic.is_bool() && rhs_basic.is_bool() => {
                 Some(SemaType::Plain(PlainType::Bool))
             }
             _ => None,
@@ -438,9 +395,7 @@ impl<'a> AnalysisContext<'a> {
     fn analyze_null_coalesce_expr(&mut self, lhs_type: SemaType, rhs_type: SemaType, _loc: Loc) -> Option<SemaType> {
         match (lhs_type.clone(), rhs_type.clone()) {
             (SemaType::Plain(PlainType::Null), SemaType::Pointer(inner))
-            | (SemaType::Pointer(inner), SemaType::Plain(PlainType::Null)) => {
-                Some(SemaType::Pointer(inner))
-            }
+            | (SemaType::Pointer(inner), SemaType::Plain(PlainType::Null)) => Some(SemaType::Pointer(inner)),
             (SemaType::Pointer(inner1), SemaType::Pointer(inner2)) => {
                 if *inner1 == *inner2 {
                     Some(SemaType::Pointer(inner1))

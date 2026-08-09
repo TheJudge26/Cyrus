@@ -1,105 +1,168 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 The Cyrus Language
 
-import std::collections{Vector};
-import std::errors{ErrorOr};
-import std::string{String};
+import (
+    std::libc{
+        fprintf,
+        stdout,
+        stderr,
+        fflush
+    },
+    std::collections{Vec},
+    std::errors{ErrorOr},
+    std::string{String}
+);
 
 pub type IOError = ErrorOr<(), ()>;
 
 pub interface Writer {
-    fn write_all(&self, data: const uint8*) IOError;
-    fn write(&self, data: const uint8*) IOError;
-    fn writeln(&self, data: const uint8*) IOError;
-    fn flush(&self) IOError;
-    fn len(&const self) usize;
+    fn write_all(self: Self*, data: const uint8*) IOError;
+    fn write(self: Self*, data: const uint8*) IOError;
+    fn writeln(self: Self*, data: const uint8*) IOError;
+    fn flush(self: Self*) IOError;
+}
+
+pub struct StdoutWriter : Writer {
+    pub fn new() Self {
+        return Self { };
+    }
+
+    pub fn write_all(self: Self*, data: const uint8*) IOError {
+        @assert(data, "data cannot be null");
+        fprintf(stdout, "%s", data);
+        return .Value(());
+    }
+
+    pub fn write(self: Self*, data: const uint8*) IOError {
+        @assert(data, "data cannot be null");
+        fprintf(stdout, "%s", data);
+        return .Value(());
+    }
+
+    pub fn writeln(self: Self*, data: const uint8*) IOError {
+        @assert(data, "data cannot be null");
+        fprintf(stdout, "%s\n", data);
+        return .Value(());
+    }
+
+    pub fn flush(self: Self*) IOError {
+        if (fflush(stdout) == 0) {
+            return .Value(());
+        } else {
+            return .Error(());
+        }
+    }
+}
+
+pub struct StderrWriter : Writer {
+    pub fn new() Self {
+        return Self { };
+    }
+
+    pub fn write_all(self: Self*, data: const uint8*) IOError {
+        @assert(data, "data cannot be null");
+        fprintf(stderr, "%s", data);
+        return .Value(());
+    }
+
+    pub fn write(self: Self*, data: const uint8*) IOError {
+        @assert(data, "data cannot be null");
+        fprintf(stderr, "%s", data);
+        return .Value(());
+    }
+
+    pub fn writeln(self: Self*, data: const uint8*) IOError {
+        @assert(data, "data cannot be null");
+        fprintf(stderr, "%s\n", data);
+        return .Value(());
+    }
+
+    pub fn flush(self: Self*) IOError {
+        if (fflush(stderr) == 0) {
+            return .Value(());
+        } else {
+            return .Error(());
+        }
+    }
 }
 
 pub struct StringWriter : Writer {
     buffer: String*,
 
-    pub fn new(const buffer: String*) Self {
+    pub fn new(buffer: String*) Self {
         @assert(buffer, "buffer cannot be null");
         return Self { buffer };
     }
 
-    pub fn to_str(&const self) String* {
-        return self->buffer;
-    }
-
-    pub fn write_all(&self, data: const uint8*) IOError {
+    pub fn write_all(self: Self*, data: const uint8*) IOError {
         @assert(data, "data cannot be null");
         self->buffer->clear();
         self->buffer->push_str(data);
         return .Value(());
     }
 
-    pub fn write(&self, data: const uint8*) IOError {
+    pub fn write(self: Self*, data: const uint8*) IOError {
         @assert(data, "data cannot be null");
         self->buffer->push_str(data);
         return .Value(());
     }
 
-    pub fn writeln(&self, data: const uint8*) IOError {
+    pub fn writeln(self: Self*, data: const uint8*) IOError {
         @assert(data, "data cannot be null");
         self->buffer->push_str(data);
         self->buffer->push('\n');
         return .Value(());
     }
 
-    pub fn flush(&self) IOError {
+    pub fn flush(self: Self*) IOError {
         return .Value(());
     }
-    
-    pub fn len(&self) usize {
-        return self->buffer->len();
+
+    pub fn to_str(self: const Self*) String* {
+        return self->buffer;
     }
 }
 
 pub struct MultiWriter {
-    writers: Vector<Writer>,
+    writers: Vec<Writer>,
 
-    pub fn new(writers: Vector<Writer>) Self {
+    pub fn new(writers: Vec<Writer>) Self {
         return Self { writers };
     }
 
-    pub fn write_all(&self, data: const uint8*) IOError {
+    pub fn write_all(self: Self*, data: const uint8*) IOError {
         @assert(data, "data cannot be null");
-        for (var i: usize = 0; i < self->writers.len(); i++) {
+        for (var i: usize = 0; i < self->writers.len(); i += 1) {
             var writer = self->writers.get(i).unwrap();
             writer.write_all(data);
         }
         return .Value(());
     }
 
-    pub fn write(&self, data: const uint8*) IOError {
+    pub fn write(self: Self*, data: const uint8*) IOError {
         @assert(data, "data cannot be null");
-        for (var i: usize = 0; i < self->writers.len(); i++) {
+        for (var i: usize = 0; i < self->writers.len(); i += 1) {
             var writer = self->writers.get(i).unwrap();
             writer.write(data);
         }
         return .Value(());
     }
 
-    pub fn writeln(&self, data: const uint8*) IOError {
+    pub fn writeln(self: Self*, data: const uint8*) IOError {
         @assert(data, "data cannot be null");
-        for (var i: usize = 0; i < self->writers.len(); i++) {
+        for (var i: usize = 0; i < self->writers.len(); i += 1) {
             var writer = self->writers.get(i).unwrap();
             writer.writeln(data);
         }
         return .Value(());
     }
 
-    pub fn flush(&self) IOError {
-        return .Value(());
-    }
-    
-    pub fn len(&self) usize {
-        var sum: usize = 0;
-        for (var i: usize = 0; i < self->writers.len(); i++) {
-            const writer = self->writers.get(i).unwrap();
-            sum += writer.len();
+    pub fn flush(self: Self*) IOError {
+        var err: IOError = .Value(());
+        for (var i: usize = 0; i < self->writers.len(); i += 1) {
+            var writer = self->writers.get(i).unwrap();
+            err = writer.flush();
         }
-        return sum;
+        return err;
     }
 }
