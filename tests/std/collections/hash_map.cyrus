@@ -1,3 +1,5 @@
+// @stdout: OK: insert and get\nOK: update existing key\nOK: remove key\nOK: table expansion and growth
+
 import std::mem::libc{LibcAllocator};
 import std::collections::hash_map{HashMap};
 import std::mem{Allocator};
