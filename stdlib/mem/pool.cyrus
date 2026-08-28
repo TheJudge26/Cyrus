@@ -55,7 +55,7 @@ pub struct PoolAllocator : Allocator {
 
         for (var i: usize = 0; i < self->total_chunks; i += 1) {
             const chunk_offset = i * self->actual_chunk_size;
-            var chunk = @cast(PoolChunk*, self->buffer + chunk_offset);
+            var chunk: PoolChunk* = @cast(void*, self->buffer + chunk_offset);
             chunk->next = self->free_list;
             self->free_list = chunk;
         }
@@ -122,7 +122,7 @@ pub struct PoolAllocator : Allocator {
             return;
         }
 
-        var chunk = @cast(PoolChunk*, ptr);
+        var chunk: PoolChunk* = ptr;
         chunk->next = self->free_list;
         self->free_list = chunk;
 

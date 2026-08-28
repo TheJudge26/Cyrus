@@ -14,8 +14,8 @@ pub fn main() {
     var pool = PoolAllocator.new(&raw_buf[0], 512, @sizeof(Node));
     const allocator: Allocator = dynamic pool;
 
-    var a: Node* = @cast(Node*, allocator.alloc(@sizeof(Node)));
-    var b: Node* = @cast(Node*, allocator.alloc(@sizeof(Node)));
+    var a: Node* = allocator.alloc(@sizeof(Node));
+    var b: Node* = allocator.alloc(@sizeof(Node));
     @assert(a != null && b != null, "allocations should succeed");
 
     a->id = 1;
@@ -23,9 +23,9 @@ pub fn main() {
     b->id = 2;
     b->val = 200;
 
-    allocator.free(@cast(void*, a));
+    allocator.free(a);
 
-    var c: Node* = @cast(Node*, allocator.alloc(@sizeof(Node)));
+    var c: Node* = allocator.alloc(@sizeof(Node));
     @assert(c != null, "re-allocation should succeed");
     c->id = 3;
     c->val = 300;
