@@ -28,6 +28,7 @@ pub struct HashSet<T> {
     cap: usize,
     hash_fn: fn(const T*) uint64,
     eq_fn: fn(const T*, const T*) bool,
+    default_value: T,
 
     pub fn with_hasher(
         allocator: Allocator,
@@ -58,6 +59,7 @@ pub struct HashSet<T> {
             cap,
             hash_fn,
             eq_fn,
+            default_value,
         };
     }
 
@@ -82,7 +84,7 @@ pub struct HashSet<T> {
             new_entries.push(SetEntry<T> {
                 state: .Empty,
                 hash: 0,
-                value: @cast(T, 0),
+                value: self->default_value,
             });
         }
 
@@ -226,5 +228,9 @@ pub struct HashSet<T> {
 
     pub fn deinit(self: Self*) {
         self->entries.free();
+    }
+
+    pub fn free(self: Self*) {
+        self->deinit();
     }
 }

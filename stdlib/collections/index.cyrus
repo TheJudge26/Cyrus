@@ -344,6 +344,10 @@ pub struct Vec<T> {
         }
     }
 
+    pub fn deinit(self: Self*) {
+        self->free();
+    }
+
     // internals 
 
     fn grow(self: Self*, min_cap: usize) {

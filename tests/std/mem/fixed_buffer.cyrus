@@ -1,4 +1,4 @@
-// @stdout: used: 40, ok
+// @stdout: used: 40, shrunk: 20, ok
 
 import std::mem::fixed_buffer{FixedBufferAllocator};
 import std::mem{Allocator};
@@ -17,7 +17,10 @@ pub fn main() {
 
     printf("used: %lu, ", fb.bytes_used());
 
-    if (nums[0] == 42 && nums[9] == 100) {
+    nums = @cast(int32*, allocator.realloc(nums, 5 * @sizeof(int32)));
+    printf("shrunk: %lu, ", fb.bytes_used());
+
+    if (nums[0] == 42) {
         printf("ok\n");
     } else {
         printf("fail\n");

@@ -79,11 +79,17 @@ pub struct FixedBufferAllocator : Allocator {
         }
 
         if (ptr == self->last_alloc_ptr) {
-            const diff = size - self->last_alloc_size;
-            if (self->offset + diff <= self->cap) {
-                self->offset += diff;
+            if (size <= self->last_alloc_size) {
+                self->offset -= (self->last_alloc_size - size);
                 self->last_alloc_size = size;
                 return ptr;
+            } else {
+                const diff = size - self->last_alloc_size;
+                if (self->offset + diff <= self->cap) {
+                    self->offset += diff;
+                    self->last_alloc_size = size;
+                    return ptr;
+                }
             }
         }
 

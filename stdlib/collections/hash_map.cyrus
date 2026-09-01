@@ -29,6 +29,8 @@ pub struct HashMap<K, V> {
     cap: usize,
     hash_fn: fn(const K*) uint64,
     eq_fn: fn(const K*, const K*) bool,
+    default_key: K,
+    default_value: V,
 
     pub fn with_hasher(
         allocator: Allocator,
@@ -61,6 +63,8 @@ pub struct HashMap<K, V> {
             cap,
             hash_fn,
             eq_fn,
+            default_key,
+            default_value,
         };
     }
 
@@ -87,8 +91,8 @@ pub struct HashMap<K, V> {
             new_entries.push(HashEntry<K, V> {
                 state: .Empty,
                 hash: 0,
-                key: @cast(K, 0),
-                value: @cast(V, 0),
+                key: self->default_key,
+                value: self->default_value,
             });
         }
 
@@ -276,6 +280,10 @@ pub struct HashMap<K, V> {
         self->len = 0;
         self->tombstones = 0;
         self->cap = 0;
+    }
+
+    pub fn deinit(self: Self*) {
+        self->free();
     }
 
     pub fn iter(self: const Self*) HashMapIter<K, V> {
